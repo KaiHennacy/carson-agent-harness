@@ -92,3 +92,19 @@ workflow does not depend on which accessible shared-storage folder the AI
 client used for its download.
 
 See `docs/ARBITRARY_LLM_CHAT.md`.
+
+## Plain-script bridge for arbitrary AI chats
+
+An arbitrary AI chat does not need to know the CARSON routing protocol.
+
+Ask it for an ordinary downloadable Termux `.sh` file, then submit that file
+locally:
+
+```bash
+bin/carson-submit <INSTANCE_ID> <DOWNLOADED_FILE.sh>
+```
+
+`carson-ingest` adds the active local routing envelope only after the file is on
+the user's device. Already-routed CARSON task files continue to pass through.
+
+See `docs/ABC_STORAGE.md`.

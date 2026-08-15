@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+umask 077
 
 usage(){
   printf 'Usage: %s <INSTANCE_ID> <FILE_PATH_OR_BASENAME>\n' "$(basename "$0")" >&2
@@ -12,62 +13,126 @@ INPUT="$2"
 REGISTRY_ROOT="${CARSON_REGISTRY_ROOT:-$HOME/.carson_agent_instances}"
 INDEX="$REGISTRY_ROOT/.registry/$INSTANCE_ID.env"
 
-[[ -f "$INDEX" ]] || { printf 'ERROR=unknown instance: %s\n' "$INSTANCE_ID" >&2; exit 1; }
+die(){ printf 'ERROR=%s\n' "$*" >&2; exit 1; }
 
-STATE_ROOT="$(
-  bash -c 'source "$1"; printf "%s" "${CARSON_STATE_ROOT:-}"' _ "$INDEX"
-)"
-[[ -n "$STATE_ROOT" && -f "$STATE_ROOT/instance.env" ]] ||
-  { printf 'ERROR=instance state missing\n' >&2; exit 1; }
+[[ -f "$INDEX" ]] || die "unknown instance: $INSTANCE_ID"
+STATE_ROOT="$(bash -c 'source "$1"; printf "%s" "${CARSON_STATE_ROOT:-}"' _ "$INDEX")"
+[[ -f "$STATE_ROOT/instance.env" ]] || die "instance manifest missing"
+[[ -f "$STATE_ROOT/active-session.env" ]] || die "instance is not running"
 
-DOWNLOAD_DIR="$(
-  bash -c 'source "$1"; printf "%s" "${CARSON_DOWNLOAD_DIR:-}"' _ "$STATE_ROOT/instance.env"
-)"
-[[ -n "$DOWNLOAD_DIR" && -d "$DOWNLOAD_DIR" ]] ||
-  { printf 'ERROR=configured download directory unavailable\n' >&2; exit 1; }
+readv(){
+  bash -c 'source "$1"; printf "%s" "${!2:-}"' _ "$1" "$2"
+}
+
+DOWNLOAD_DIR="$(readv "$STATE_ROOT/instance.env" CARSON_DOWNLOAD_DIR)"
+SESSION_ID="$(readv "$STATE_ROOT/active-session.env" CARSON_SESSION_ID)"
+TASK_PREFIX="$(readv "$STATE_ROOT/active-session.env" CARSON_TASK_PREFIX)"
+
+[[ -d "$DOWNLOAD_DIR" ]] || die "configured harness inbox unavailable"
+[[ -n "$SESSION_ID" && -n "$TASK_PREFIX" ]] || die "active routing data incomplete"
 
 SOURCE=""
 if [[ -f "$INPUT" ]]; then
-  SOURCE="$(cd "$(dirname "$INPUT")" && pwd)/$(basename "$INPUT")"
+  SOURCE="$(cd "$(dirname "$INPUT")" && pwd -P)/$(basename "$INPUT")"
 else
   BASENAME="$(basename "$INPUT")"
-  [[ "$BASENAME" == "$INPUT" ]] ||
-    { printf 'ERROR=file path does not exist: %s\n' "$INPUT" >&2; exit 1; }
+  [[ "$BASENAME" == "$INPUT" ]] || die "file path does not exist: $INPUT"
 
-  candidates=()
+  roots=()
   for root in \
     "$HOME/storage/downloads" \
     "$HOME/storage/shared/Download" \
     "$HOME/storage/shared/Downloads" \
     "$HOME/storage/shared/Documents" \
+    "$HOME/storage/shared/carson-agent/C" \
     "$HOME/storage/shared"
   do
     [[ -d "$root" ]] || continue
-    candidates+=("$root")
+    physical="$(cd "$root" && pwd -P)"
+    seen=NO
+    for existing in "${roots[@]:-}"; do
+      [[ "$existing" == "$physical" ]] && seen=YES
+    done
+    [[ "$seen" == "NO" ]] && roots+=("$physical")
   done
 
-  [[ ${#candidates[@]} -gt 0 ]] ||
-    { printf 'ERROR=no accessible shared-storage search roots\n' >&2; exit 1; }
+  [[ ${#roots[@]} -gt 0 ]] || die "no Termux-accessible shared-storage roots"
 
-  # Search by exact basename only, bounded to shallow shared-storage depth.
   SOURCE="$(
-    find "${candidates[@]}" -maxdepth 4 -type f -name "$BASENAME" \
+    find "${roots[@]}" -maxdepth 4 -type f -name "$BASENAME" \
       -printf '%T@\t%p\n' 2>/dev/null |
-      sort -nr |
-      head -n 1 |
-      cut -f2-
+    sort -nr |
+    head -n 1 |
+    cut -f2-
   )"
 fi
 
-[[ -n "$SOURCE" && -f "$SOURCE" ]] ||
-  { printf 'ERROR=downloaded file not found in Termux-accessible storage: %s\n' "$INPUT" >&2; exit 1; }
+[[ -n "$SOURCE" && -f "$SOURCE" ]] || die "input file not found: $INPUT"
 
-DEST="$DOWNLOAD_DIR/$(basename "$SOURCE")"
-if [[ "$SOURCE" != "$DEST" ]]; then
-  cp -p "$SOURCE" "$DEST"
+SOURCE_BASE="$(basename "$SOURCE")"
+SOURCE_SHA="$(sha256sum "$SOURCE" | awk '{print $1}')"
+
+if [[ "$SOURCE_BASE" == "$TASK_PREFIX"* ]] &&
+   head -c 4096 "$SOURCE" | grep -Fqx "# CARSON_INSTANCE_ID=$INSTANCE_ID" &&
+   head -c 4096 "$SOURCE" | grep -Fqx "# CARSON_SESSION_ID=$SESSION_ID" &&
+   head -c 4096 "$SOURCE" | grep -Fqx '# CARSON_AGENT_PROTOCOL=CARSON_DOWNLOAD_AGENT_V1' &&
+   head -c 4096 "$SOURCE" | grep -Fqx '# CARSON_PAYLOAD_TYPE=NEXT_LLM_TASK'
+then
+  DEST="$DOWNLOAD_DIR/$SOURCE_BASE"
+  [[ "$SOURCE" == "$DEST" ]] || cp -p "$SOURCE" "$DEST"
+  chmod 755 "$DEST"
+  printf '%s\n' \
+    "INGEST_STATUS=PASS" \
+    "INGEST_MODE=PRE_ROUTED" \
+    "SOURCE_FILE=$SOURCE" \
+    "SOURCE_SHA256=$SOURCE_SHA" \
+    "HARNESS_TASK_BASENAME=$(basename "$DEST")" \
+    "HARNESS_INBOX_FILE=$DEST"
+  exit 0
 fi
 
-printf 'INGEST_STATUS=PASS\n'
-printf 'INSTANCE_ID=%s\n' "$INSTANCE_ID"
-printf 'SOURCE_FILE=%s\n' "$SOURCE"
-printf 'HARNESS_INBOX_FILE=%s\n' "$DEST"
+case "$SOURCE_BASE" in
+  *.sh) ;;
+  *) die "plain-file wrapping accepts .sh files only" ;;
+esac
+
+SAFE_STEM="$(
+  printf '%s' "${SOURCE_BASE%.sh}" |
+    tr -c 'A-Za-z0-9._-' '_' |
+    cut -c1-72
+)"
+[[ -n "$SAFE_STEM" ]] || SAFE_STEM="PLAIN_SCRIPT"
+
+TOKEN="$(date -u +%Y%m%dT%H%M%SZ)_$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
+TASK_BASE="${TASK_PREFIX}${SAFE_STEM}_WRAPPED_${TOKEN}.sh"
+DEST="$DOWNLOAD_DIR/$TASK_BASE"
+TMP="$STATE_ROOT/.wrap.$$.tmp"
+
+{
+  printf '%s\n' '#!/data/data/com.termux/files/usr/bin/bash'
+  printf '%s\n' '# CARSON_AGENT_PROTOCOL=CARSON_DOWNLOAD_AGENT_V1'
+  printf '# CARSON_INSTANCE_ID=%s\n' "$INSTANCE_ID"
+  printf '# CARSON_SESSION_ID=%s\n' "$SESSION_ID"
+  printf '%s\n' '# CARSON_PAYLOAD_TYPE=NEXT_LLM_TASK'
+  printf '# CARSON_WRAPPED_SOURCE_SHA256=%s\n' "$SOURCE_SHA"
+  printf '# CARSON_WRAPPED_SOURCE_BASENAME=%s\n' "$SOURCE_BASE"
+  printf '\n'
+  first="$(head -n 1 "$SOURCE" || true)"
+  if [[ "$first" == '#!'* ]]; then
+    tail -n +2 "$SOURCE"
+  else
+    cat "$SOURCE"
+  fi
+} > "$TMP"
+
+chmod 755 "$TMP"
+bash -n "$TMP" || { rm -f "$TMP"; die "wrapped script fails bash syntax check"; }
+mv "$TMP" "$DEST"
+
+printf '%s\n' \
+  "INGEST_STATUS=PASS" \
+  "INGEST_MODE=WRAPPED_PLAIN_SCRIPT" \
+  "SOURCE_FILE=$SOURCE" \
+  "SOURCE_SHA256=$SOURCE_SHA" \
+  "HARNESS_TASK_BASENAME=$TASK_BASE" \
+  "HARNESS_INBOX_FILE=$DEST"

@@ -12,7 +12,7 @@ carson_require_dir CARSON_B_DIR "${CARSON_B_DIR:-}"
 # Preserve caller-supplied values before reading any existing instance files.
 # Existing manifests are intentionally read in isolated subshells so they
 # cannot overwrite the new installation request.
-REQUESTED_DOWNLOAD_DIR="$CARSON_DOWNLOAD_DIR"
+REQUESTED_DOWNLOAD_DIR="$(cd "$CARSON_DOWNLOAD_DIR" && pwd -P)"
 REQUESTED_A_DIR="$CARSON_A_DIR"
 REQUESTED_B_DIR="$CARSON_B_DIR"
 REQUESTED_INSTANCE_ID="${CARSON_INSTANCE_ID:-}"

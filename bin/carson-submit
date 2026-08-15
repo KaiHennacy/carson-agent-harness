@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+usage(){
+  printf 'Usage: %s <INSTANCE_ID> <FILE_PATH_OR_BASENAME> [TIMEOUT_SECONDS]\n' "$(basename "$0")" >&2
+  exit 64
+}
+[[ $# -ge 2 && $# -le 3 ]] || usage
+
+INSTANCE_ID="$1"
+INPUT="$2"
+WAIT_SECONDS="${3:-120}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+INGEST="$ROOT/bin/carson-ingest"
+REGISTRY_ROOT="${CARSON_REGISTRY_ROOT:-$HOME/.carson_agent_instances}"
+INDEX="$REGISTRY_ROOT/.registry/$INSTANCE_ID.env"
+
+[[ -x "$INGEST" ]] || { printf 'ERROR=carson-ingest unavailable\n' >&2; exit 1; }
+[[ -f "$INDEX" ]] || { printf 'ERROR=unknown instance\n' >&2; exit 1; }
+
+STATE_ROOT="$(bash -c 'source "$1"; printf "%s" "${CARSON_STATE_ROOT:-}"' _ "$INDEX")"
+A_DIR="$(bash -c 'source "$1"; printf "%s" "${CARSON_A_DIR:-}"' _ "$STATE_ROOT/instance.env")"
+[[ -n "$A_DIR" ]] || { printf 'ERROR=A directory unavailable\n' >&2; exit 1; }
+
+OUT="$("$INGEST" "$INSTANCE_ID" "$INPUT")"
+printf '%s\n' "$OUT"
+TASK_BASE="$(printf '%s\n' "$OUT" | awk -F= '$1=="HARNESS_TASK_BASENAME"{print $2;exit}')"
+[[ -n "$TASK_BASE" ]] || { printf 'ERROR=ingest returned no task basename\n' >&2; exit 1; }
+
+deadline=$((SECONDS + WAIT_SECONDS))
+while (( SECONDS < deadline )); do
+  if [[ -f "$A_DIR/NEXT_LLM_MESSAGE.txt" ]] &&
+     grep -Fq "SOURCE_FILE=$TASK_BASE" "$A_DIR/NEXT_LLM_MESSAGE.txt"; then
+    cat "$A_DIR/NEXT_LLM_MESSAGE.txt"
+    exit 0
+  fi
+  sleep 1
+done
+
+printf 'ERROR=timed out waiting for task result: %s\n' "$TASK_BASE" >&2
+exit 124

@@ -30,11 +30,19 @@ else
   }
 fi
 
+# Canonicalize the selected directory before persisting it. Termux commonly
+# exposes ~/storage/downloads as a directory symlink; storing the physical path
+# prevents listener scans from depending on find(1)'s symlink traversal mode.
+DOWNLOAD_DIR="$(cd "$DOWNLOAD_DIR" && pwd -P)"
+
 # Stable device-level output location for the normal single primary instance.
 # Advanced/multi-instance installs can override A/B paths explicitly.
 A_DIR="${CARSON_A_DIR:-$HOME/storage/shared/carson-agent/a}"
 B_DIR="${CARSON_B_DIR:-$HOME/storage/shared/carson-agent/B}"
-mkdir -p "$A_DIR" "$B_DIR"
+C_DIR="${CARSON_C_DIR:-$HOME/storage/shared/carson-agent/C}"
+mkdir -p "$A_DIR" "$B_DIR" "$C_DIR"
+
+cp -p "$ROOT/docs/LLM_DOWNLOADABLE_SCRIPT_NOTE.md"   "$C_DIR/LLM_DOWNLOADABLE_SCRIPT_NOTE.md"
 
 env \
   CARSON_DOWNLOAD_DIR="$DOWNLOAD_DIR" \

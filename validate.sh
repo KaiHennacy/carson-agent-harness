@@ -28,6 +28,7 @@ required=(
   bin/carson-agent
   bin/carson-chat-bootstrap
   bin/carson-ingest
+  bin/carson-submit
   lib/common.sh
   lib/listener.sh
   docs/INSTALLATION.md
@@ -35,6 +36,8 @@ required=(
   docs/ROUTING.md
   docs/SELF_PUBLISH.md
   docs/ARBITRARY_LLM_CHAT.md
+  docs/LLM_DOWNLOADABLE_SCRIPT_NOTE.md
+  docs/ABC_STORAGE.md
   examples/example.env
   .gitignore
 )
@@ -48,6 +51,7 @@ bash -n validate.sh
 bash -n bin/carson-agent
 bash -n bin/carson-chat-bootstrap
 bash -n bin/carson-ingest
+bash -n bin/carson-submit
 bash -n quick-install.sh
 bash -n lib/common.sh
 bash -n lib/listener.sh
