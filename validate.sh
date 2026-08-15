@@ -112,6 +112,13 @@ grep -Fq 'CARSON_A_DIR' install.sh ||
 grep -Fq 'CARSON_B_DIR' install.sh ||
   fail "installer missing CARSON_B_DIR"
 
+grep -Fq 'quick-install.sh' install.sh ||
+  fail "installer does not package quick-install.sh"
+grep -Fq 'validate.sh' install.sh ||
+  fail "installer does not package validate.sh"
+grep -Fq '.github' install.sh ||
+  fail "installer does not package GitHub metadata"
+
 grep -Fq '# CARSON_INSTANCE_ID=' lib/listener.sh ||
   fail "listener missing instance metadata gate"
 grep -Fq '# CARSON_SESSION_ID=' lib/listener.sh ||

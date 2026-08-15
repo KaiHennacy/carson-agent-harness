@@ -75,7 +75,7 @@ done
 
 mkdir -p "$INSTALL_ROOT"
 
-for item in bin lib docs examples .github README.md .gitignore install.sh validate.sh; do
+for item in bin lib docs examples .github README.md .gitignore install.sh quick-install.sh validate.sh; do
   [[ -e "$SOURCE_ROOT/$item" ]] || continue
   cp -a "$SOURCE_ROOT/$item" "$INSTALL_ROOT/"
 done
