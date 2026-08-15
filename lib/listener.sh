@@ -1,0 +1,188 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -Eeuo pipefail
+
+STATE_ROOT="${1:-}"
+SESSION_DIR="${2:-}"
+
+[[ -n "$STATE_ROOT" && -n "$SESSION_DIR" ]] || {
+  printf 'usage: listener.sh STATE_ROOT SESSION_DIR\n' >&2
+  exit 64
+}
+
+[[ -f "$STATE_ROOT/instance.env" ]] || exit 65
+[[ -f "$SESSION_DIR/session.env" ]] || exit 66
+
+# shellcheck disable=SC1090
+source "$STATE_ROOT/instance.env"
+# shellcheck disable=SC1090
+source "$SESSION_DIR/session.env"
+
+LEDGER="$SESSION_DIR/processed_sha256.tsv"
+EVENT_LOG="$SESSION_DIR/events.log"
+LOCK_DIR="$SESSION_DIR/listener.lock"
+POLL_SECONDS="${CARSON_POLL_SECONDS:-2}"
+
+mkdir -p "$CARSON_A_DIR" "$CARSON_B_DIR" "$SESSION_DIR"
+touch "$LEDGER" "$EVENT_LOG"
+
+utc_now() {
+  date -u '+%Y-%m-%dT%H:%M:%SZ'
+}
+
+log_event() {
+  printf '%s\t%s\n' "$(utc_now)" "$*" >> "$EVENT_LOG"
+}
+
+already_seen_sha() {
+  grep -Fq $'\t'"$1"$'\t' "$LEDGER" 2>/dev/null
+}
+
+record_sha() {
+  printf '%s\t%s\t%s\t%s\n' "$(utc_now)" "$1" "$2" "$3" >> "$LEDGER"
+}
+
+stable_file() {
+  local file="$1" a b
+  a="$(stat -c '%s:%Y' "$file" 2>/dev/null)" || return 1
+  sleep 1
+  b="$(stat -c '%s:%Y' "$file" 2>/dev/null)" || return 1
+  [[ "$a" == "$b" ]]
+}
+
+has_header_line() {
+  local file="$1" expected="$2"
+  head -c 4096 "$file" 2>/dev/null | grep -aFqx -- "$expected"
+}
+
+metadata_matches() {
+  local file="$1"
+  has_header_line "$file" "# CARSON_AGENT_PROTOCOL=CARSON_DOWNLOAD_AGENT_V1" || return 1
+  has_header_line "$file" "# CARSON_INSTANCE_ID=$CARSON_INSTANCE_ID" || return 1
+  has_header_line "$file" "# CARSON_SESSION_ID=$CARSON_SESSION_ID" || return 1
+  has_header_line "$file" "# CARSON_PAYLOAD_TYPE=NEXT_LLM_TASK" || return 1
+}
+
+archive_and_clear_a() {
+  local stamp suffix archive
+  suffix="${1:-EVENT}"
+  stamp="$(date -u '+%Y%m%dT%H%M%SZ')"
+
+  if find "$CARSON_A_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .; then
+    archive="$CARSON_B_DIR/A_ARCHIVE_${stamp}_${suffix}_$$"
+    mkdir -p "$archive"
+    cp -a "$CARSON_A_DIR"/. "$archive"/
+    find "$CARSON_A_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+    printf '%s\n' "$archive"
+  fi
+}
+
+emit_next_message() {
+  local source_file="$1" sha="$2" rc="$3" stdout_file="$4" stderr_file="$5"
+  local archive_path tmp
+
+  archive_path="$(archive_and_clear_a "${sha:0:12}" || true)"
+  tmp="$CARSON_A_DIR/.NEXT_LLM_MESSAGE.$$.tmp"
+
+  {
+    printf 'CARSON_NEXT_LLM_MESSAGE_V2\n'
+    printf 'INSTANCE_ID=%s\n' "$CARSON_INSTANCE_ID"
+    printf 'SESSION_ID=%s\n' "$CARSON_SESSION_ID"
+    printf 'PROTOCOL=CARSON_DOWNLOAD_AGENT_V1\n'
+    printf 'SOURCE_FILE=%s\n' "$(basename "$source_file")"
+    printf 'SOURCE_SHA256=%s\n' "$sha"
+    printf 'EXECUTION_RC=%s\n' "$rc"
+    printf 'CREATED_AT_UTC=%s\n' "$(utc_now)"
+    printf 'PREVIOUS_A_ARCHIVE=%s\n' "${archive_path:-NONE}"
+    printf '%s\n' '---BEGIN_NEXT_LLM_MESSAGE---'
+    if [[ -s "$stdout_file" ]]; then
+      cat "$stdout_file"
+      printf '\n'
+    else
+      printf 'Payload produced no stdout.\n'
+    fi
+    if [[ "$rc" -ne 0 ]]; then
+      printf '\n[HARNESS_EXECUTION_ERROR]\n'
+      printf 'Downloaded payload exited with rc=%s.\n' "$rc"
+      if [[ -s "$stderr_file" ]]; then
+        printf '%s\n' '---BEGIN_STDERR---'
+        cat "$stderr_file"
+        printf '\n%s\n' '---END_STDERR---'
+      fi
+    fi
+    printf '%s\n' '---END_NEXT_LLM_MESSAGE---'
+  } > "$tmp"
+
+  mv -f "$tmp" "$CARSON_A_DIR/NEXT_LLM_MESSAGE.txt"
+}
+
+process_candidate() {
+  local file="$1" sha rc out err
+
+  [[ -f "$file" ]] || return 2
+  metadata_matches "$file" || return 2
+  stable_file "$file" || return 2
+
+  sha="$(sha256sum "$file" 2>/dev/null | awk '{print $1}')" || return 2
+  [[ "$sha" =~ ^[0-9a-fA-F]{64}$ ]] || return 2
+  already_seen_sha "$sha" && return 3
+
+  log_event "EXECUTE_START sha=$sha file=$file"
+
+  out="$SESSION_DIR/stdout.$sha.tmp"
+  err="$SESSION_DIR/stderr.$sha.tmp"
+
+  set +e
+  bash "$file" >"$out" 2>"$err"
+  rc=$?
+  set -e
+
+  emit_next_message "$file" "$sha" "$rc" "$out" "$err"
+  record_sha "$sha" "EXECUTED_RC_$rc" "$file"
+  log_event "EXECUTED sha=$sha rc=$rc file=$file"
+  rm -f "$out" "$err"
+  return 0
+}
+
+process_latest_matching_unseen() {
+  local entry file rc
+
+  while IFS= read -r -d '' entry; do
+    file="${entry#*$'\t'}"
+    [[ -f "$file" ]] || continue
+
+    set +e
+    process_candidate "$file"
+    rc=$?
+    set -e
+
+    [[ "$rc" -eq 0 ]] && return 0
+  done < <(
+    find "$CARSON_DOWNLOAD_DIR" -maxdepth 1 -type f \
+      -name "${CARSON_TASK_PREFIX}*.sh" \
+      -printf '%T@\t%p\0' 2>/dev/null |
+      sort -z -t $'\t' -k1,1nr
+  )
+}
+
+carson_requirements_ok=1
+[[ -d "$CARSON_DOWNLOAD_DIR" ]] || carson_requirements_ok=0
+[[ -d "$CARSON_A_DIR" ]] || carson_requirements_ok=0
+[[ -d "$CARSON_B_DIR" ]] || carson_requirements_ok=0
+
+[[ "$carson_requirements_ok" -eq 1 ]] || {
+  log_event "FATAL configured_directory_missing"
+  exit 67
+}
+
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  log_event "FATAL duplicate_listener_lock"
+  exit 68
+fi
+trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
+
+log_event "LISTENER_START instance=$CARSON_INSTANCE_ID session=$CARSON_SESSION_ID prefix=$CARSON_TASK_PREFIX"
+
+while true; do
+  process_latest_matching_unseen || true
+  sleep "$POLL_SECONDS"
+done

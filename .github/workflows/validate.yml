@@ -1,0 +1,14 @@
+name: validate
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  repository-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate generic source
+        shell: bash
+        run: bash ./validate.sh

@@ -1,0 +1,268 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -Eeuo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SELF_DIR/.." && pwd)"
+# shellcheck source=../lib/common.sh
+source "$ROOT/lib/common.sh"
+
+REGISTRY_ROOT="$(carson_registry_root)"
+mkdir -p "$REGISTRY_ROOT" "$(carson_registry_index_dir)"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  carson-agent init
+  carson-agent list
+  carson-agent show <INSTANCE_ID>
+  carson-agent start <INSTANCE_ID>
+  carson-agent stop <INSTANCE_ID>
+  carson-agent restart <INSTANCE_ID>
+  carson-agent status <INSTANCE_ID>
+
+Environment for init:
+  CARSON_DOWNLOAD_DIR    required
+  CARSON_A_DIR           required
+  CARSON_B_DIR           required
+  CARSON_INSTANCE_ID     optional; generated if absent
+  CARSON_INSTANCE_LABEL  optional
+  CARSON_STATE_ROOT      optional
+USAGE
+}
+
+write_instance_env() {
+  local file="$1"
+  {
+    carson_shell_kv CARSON_INSTANCE_ID "$CARSON_INSTANCE_ID"
+    carson_shell_kv CARSON_INSTANCE_LABEL "${CARSON_INSTANCE_LABEL:-}"
+    carson_shell_kv CARSON_DOWNLOAD_DIR "$CARSON_DOWNLOAD_DIR"
+    carson_shell_kv CARSON_A_DIR "$CARSON_A_DIR"
+    carson_shell_kv CARSON_B_DIR "$CARSON_B_DIR"
+    carson_shell_kv CARSON_STATE_ROOT "$CARSON_STATE_ROOT"
+    carson_shell_kv CARSON_SOURCE_ROOT "$ROOT"
+    carson_shell_kv CARSON_IMPLEMENTATION_VERSION "$CARSON_IMPLEMENTATION_VERSION"
+    carson_shell_kv CARSON_CREATED_AT_UTC "$CARSON_CREATED_AT_UTC"
+  } > "$file"
+  chmod 600 "$file"
+}
+
+cmd_init() {
+  carson_require_dir CARSON_DOWNLOAD_DIR "${CARSON_DOWNLOAD_DIR:-}"
+  carson_require_dir CARSON_A_DIR "${CARSON_A_DIR:-}"
+  carson_require_dir CARSON_B_DIR "${CARSON_B_DIR:-}"
+
+  CARSON_INSTANCE_ID="${CARSON_INSTANCE_ID:-$(carson_generate_instance_id)}"
+  CARSON_INSTANCE_LABEL="${CARSON_INSTANCE_LABEL:-}"
+  CARSON_STATE_ROOT="${CARSON_STATE_ROOT:-$REGISTRY_ROOT/$CARSON_INSTANCE_ID}"
+  CARSON_CREATED_AT_UTC="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+  [[ ! -f "$CARSON_STATE_ROOT/instance.env" ]] ||
+    carson_die "Instance already exists: $CARSON_INSTANCE_ID"
+
+  mkdir -p "$CARSON_STATE_ROOT/sessions"
+  write_instance_env "$CARSON_STATE_ROOT/instance.env"
+  carson_register_instance "$CARSON_INSTANCE_ID" "$CARSON_STATE_ROOT"
+
+  printf 'INSTANCE_CREATED\n'
+  cat "$CARSON_STATE_ROOT/instance.env"
+}
+
+session_running() {
+  local state_root="$1"
+  local CARSON_TMUX_SESSION=""
+  [[ -f "$state_root/active-session.env" ]] || return 1
+  # shellcheck disable=SC1090
+  source "$state_root/active-session.env"
+  [[ -n "$CARSON_TMUX_SESSION" ]] || return 1
+  tmux has-session -t "$CARSON_TMUX_SESSION" 2>/dev/null
+}
+
+cmd_start() {
+  local requested_id="${1:-}"
+  [[ -n "$requested_id" ]] || carson_die "INSTANCE_ID required"
+
+  carson_load_instance "$requested_id"
+  carson_require_dir CARSON_DOWNLOAD_DIR "$CARSON_DOWNLOAD_DIR"
+  carson_require_dir CARSON_A_DIR "$CARSON_A_DIR"
+  carson_require_dir CARSON_B_DIR "$CARSON_B_DIR"
+
+  if session_running "$CARSON_STATE_ROOT"; then
+    printf 'ALREADY_RUNNING\n'
+    cat "$CARSON_STATE_ROOT/active-session.env"
+    return 0
+  fi
+
+  local session_id route_token task_prefix tmux_name session_dir
+  session_id="$(carson_generate_session_id "$CARSON_INSTANCE_ID")"
+  route_token="$(carson_route_token "$CARSON_INSTANCE_ID" "$session_id")"
+  task_prefix="CARSON_AGENT_${route_token}_TASK_"
+  tmux_name="carson_${route_token}"
+  session_dir="$CARSON_STATE_ROOT/sessions/$session_id"
+  mkdir -p "$session_dir"
+
+  {
+    carson_shell_kv CARSON_SESSION_ID "$session_id"
+    carson_shell_kv CARSON_ROUTE_TOKEN "$route_token"
+    carson_shell_kv CARSON_TASK_PREFIX "$task_prefix"
+    carson_shell_kv CARSON_TMUX_SESSION "$tmux_name"
+    carson_shell_kv CARSON_SESSION_DIR "$session_dir"
+    carson_shell_kv CARSON_SESSION_CREATED_AT_UTC "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  } > "$session_dir/session.env"
+  chmod 600 "$session_dir/session.env"
+
+  cp "$session_dir/session.env" "$CARSON_STATE_ROOT/active-session.env"
+  chmod 600 "$CARSON_STATE_ROOT/active-session.env"
+
+  touch "$session_dir/processed_sha256.tsv" "$session_dir/events.log"
+
+  tmux new-session -d -s "$tmux_name" \
+    "bash '$CARSON_SOURCE_ROOT/lib/listener.sh' '$CARSON_STATE_ROOT' '$session_dir'"
+
+  sleep 1
+  tmux has-session -t "$tmux_name" 2>/dev/null ||
+    carson_die "Listener failed to start: $tmux_name"
+
+  printf 'STARTED\n'
+  cat "$CARSON_STATE_ROOT/active-session.env"
+}
+
+cmd_stop() {
+  local requested_id="${1:-}"
+  [[ -n "$requested_id" ]] || carson_die "INSTANCE_ID required"
+
+  carson_load_instance "$requested_id"
+
+  if [[ ! -f "$CARSON_STATE_ROOT/active-session.env" ]]; then
+    printf 'ALREADY_STOPPED\n'
+    return 0
+  fi
+
+  local CARSON_TMUX_SESSION="" CARSON_SESSION_DIR=""
+  # shellcheck disable=SC1090
+  source "$CARSON_STATE_ROOT/active-session.env"
+
+  if [[ -n "$CARSON_TMUX_SESSION" ]]; then
+    tmux kill-session -t "$CARSON_TMUX_SESSION" 2>/dev/null || true
+  fi
+
+  if [[ -n "$CARSON_SESSION_DIR" && -f "$CARSON_SESSION_DIR/events.log" ]]; then
+    printf '%s\tSTOPPED_BY_CLI\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+      >> "$CARSON_SESSION_DIR/events.log"
+  fi
+
+  rm -f "$CARSON_STATE_ROOT/active-session.env"
+  printf 'STOPPED\n'
+}
+
+cmd_restart() {
+  local requested_id="${1:-}"
+  [[ -n "$requested_id" ]] || carson_die "INSTANCE_ID required"
+  cmd_stop "$requested_id" >/dev/null || true
+  cmd_start "$requested_id"
+}
+
+cmd_status() {
+  local requested_id="${1:-}"
+  [[ -n "$requested_id" ]] || carson_die "INSTANCE_ID required"
+
+  carson_load_instance "$requested_id"
+
+  printf 'INSTANCE_ID=%s\n' "$CARSON_INSTANCE_ID"
+  printf 'INSTANCE_LABEL=%s\n' "${CARSON_INSTANCE_LABEL:-}"
+  printf 'STATE_ROOT=%s\n' "$CARSON_STATE_ROOT"
+  printf 'DOWNLOAD_DIR=%s\n' "$CARSON_DOWNLOAD_DIR"
+  printf 'A_DIR=%s\n' "$CARSON_A_DIR"
+  printf 'B_DIR=%s\n' "$CARSON_B_DIR"
+
+  if [[ -f "$CARSON_STATE_ROOT/active-session.env" ]]; then
+    # shellcheck disable=SC1090
+    source "$CARSON_STATE_ROOT/active-session.env"
+    printf 'SESSION_ID=%s\n' "${CARSON_SESSION_ID:-UNKNOWN}"
+    printf 'TASK_PREFIX=%s\n' "${CARSON_TASK_PREFIX:-UNKNOWN}"
+    printf 'TMUX_SESSION=%s\n' "${CARSON_TMUX_SESSION:-UNKNOWN}"
+    if [[ -n "${CARSON_TMUX_SESSION:-}" ]] &&
+       tmux has-session -t "$CARSON_TMUX_SESSION" 2>/dev/null; then
+      printf 'LISTENER_STATUS=RUNNING\n'
+    else
+      printf 'LISTENER_STATUS=STALE\n'
+    fi
+  else
+    printf 'SESSION_ID=NONE\n'
+    printf 'TASK_PREFIX=NONE\n'
+    printf 'TMUX_SESSION=NONE\n'
+    printf 'LISTENER_STATUS=STOPPED\n'
+  fi
+}
+
+cmd_show() {
+  local requested_id="${1:-}"
+  [[ -n "$requested_id" ]] || carson_die "INSTANCE_ID required"
+  local state_root
+  state_root="$(carson_resolve_state_root "$requested_id")" ||
+    carson_die "Unknown instance: $requested_id"
+  cat "$state_root/instance.env"
+  if [[ -f "$state_root/active-session.env" ]]; then
+    cat "$state_root/active-session.env"
+  fi
+}
+
+cmd_list() {
+  local index_file state_root instance_file
+  local seen=""
+
+  for index_file in "$(carson_registry_index_dir)"/*.env; do
+    [[ -f "$index_file" ]] || continue
+
+    local CARSON_STATE_ROOT=""
+    # shellcheck disable=SC1090
+    source "$index_file"
+    state_root="$CARSON_STATE_ROOT"
+    instance_file="$state_root/instance.env"
+    [[ -f "$instance_file" ]] || continue
+
+    local CARSON_INSTANCE_ID="" CARSON_INSTANCE_LABEL="" CARSON_DOWNLOAD_DIR=""
+    local CARSON_A_DIR="" CARSON_B_DIR="" CARSON_CREATED_AT_UTC=""
+    local CARSON_IMPLEMENTATION_VERSION=""
+    # shellcheck disable=SC1090
+    source "$instance_file"
+
+    local status="STOPPED" session_id="NONE" task_prefix="NONE"
+    if [[ -f "$state_root/active-session.env" ]]; then
+      local CARSON_SESSION_ID="" CARSON_TASK_PREFIX="" CARSON_TMUX_SESSION=""
+      # shellcheck disable=SC1090
+      source "$state_root/active-session.env"
+      session_id="${CARSON_SESSION_ID:-NONE}"
+      task_prefix="${CARSON_TASK_PREFIX:-NONE}"
+      if [[ -n "${CARSON_TMUX_SESSION:-}" ]] &&
+         tmux has-session -t "$CARSON_TMUX_SESSION" 2>/dev/null; then
+        status="RUNNING"
+      else
+        status="STALE"
+      fi
+    fi
+
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$CARSON_INSTANCE_ID" \
+      "${CARSON_INSTANCE_LABEL:-}" \
+      "$status" \
+      "$session_id" \
+      "$task_prefix" \
+      "$CARSON_DOWNLOAD_DIR" \
+      "$CARSON_A_DIR" \
+      "$CARSON_B_DIR" \
+      "$state_root" \
+      "${CARSON_IMPLEMENTATION_VERSION:-UNKNOWN}"
+  done
+}
+
+case "${1:-}" in
+  init) shift; cmd_init "$@" ;;
+  list) shift; cmd_list "$@" ;;
+  show) shift; cmd_show "$@" ;;
+  start) shift; cmd_start "$@" ;;
+  stop) shift; cmd_stop "$@" ;;
+  restart) shift; cmd_restart "$@" ;;
+  status) shift; cmd_status "$@" ;;
+  -h|--help|help|"") usage ;;
+  *) carson_die "Unknown command: $1" ;;
+esac
