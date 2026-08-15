@@ -72,3 +72,23 @@ See:
 The repository contains generic implementation only. Runtime state, generated
 instance/session identities, device credentials, processed-checksum ledgers,
 event logs, A/B history, and authentication material are not repository source.
+
+## Arbitrary AI chats
+
+For a normal fresh Termux device, `bash ./quick-install.sh` auto-discovers the
+usual shared Download directory and uses a stable device-level A/B location.
+Explicit environment variables remain available for custom or multi-instance
+installations.
+
+To onboard a context-free AI chat, generate a live routing attachment:
+
+```bash
+bin/carson-chat-bootstrap <INSTANCE_ID>
+```
+
+Attach the generated Markdown file to that chat. It instructs the model how to
+emit a routed downloadable task and how to use `bin/carson-ingest` so the
+workflow does not depend on which accessible shared-storage folder the AI
+client used for its download.
+
+See `docs/ARBITRARY_LLM_CHAT.md`.

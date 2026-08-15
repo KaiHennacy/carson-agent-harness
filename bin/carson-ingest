@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+usage(){
+  printf 'Usage: %s <INSTANCE_ID> <FILE_PATH_OR_BASENAME>\n' "$(basename "$0")" >&2
+  exit 64
+}
+
+[[ $# -eq 2 ]] || usage
+INSTANCE_ID="$1"
+INPUT="$2"
+REGISTRY_ROOT="${CARSON_REGISTRY_ROOT:-$HOME/.carson_agent_instances}"
+INDEX="$REGISTRY_ROOT/.registry/$INSTANCE_ID.env"
+
+[[ -f "$INDEX" ]] || { printf 'ERROR=unknown instance: %s\n' "$INSTANCE_ID" >&2; exit 1; }
+
+STATE_ROOT="$(
+  bash -c 'source "$1"; printf "%s" "${CARSON_STATE_ROOT:-}"' _ "$INDEX"
+)"
+[[ -n "$STATE_ROOT" && -f "$STATE_ROOT/instance.env" ]] ||
+  { printf 'ERROR=instance state missing\n' >&2; exit 1; }
+
+DOWNLOAD_DIR="$(
+  bash -c 'source "$1"; printf "%s" "${CARSON_DOWNLOAD_DIR:-}"' _ "$STATE_ROOT/instance.env"
+)"
+[[ -n "$DOWNLOAD_DIR" && -d "$DOWNLOAD_DIR" ]] ||
+  { printf 'ERROR=configured download directory unavailable\n' >&2; exit 1; }
+
+SOURCE=""
+if [[ -f "$INPUT" ]]; then
+  SOURCE="$(cd "$(dirname "$INPUT")" && pwd)/$(basename "$INPUT")"
+else
+  BASENAME="$(basename "$INPUT")"
+  [[ "$BASENAME" == "$INPUT" ]] ||
+    { printf 'ERROR=file path does not exist: %s\n' "$INPUT" >&2; exit 1; }
+
+  candidates=()
+  for root in \
+    "$HOME/storage/downloads" \
+    "$HOME/storage/shared/Download" \
+    "$HOME/storage/shared/Downloads" \
+    "$HOME/storage/shared/Documents" \
+    "$HOME/storage/shared"
+  do
+    [[ -d "$root" ]] || continue
+    candidates+=("$root")
+  done
+
+  [[ ${#candidates[@]} -gt 0 ]] ||
+    { printf 'ERROR=no accessible shared-storage search roots\n' >&2; exit 1; }
+
+  # Search by exact basename only, bounded to shallow shared-storage depth.
+  SOURCE="$(
+    find "${candidates[@]}" -maxdepth 4 -type f -name "$BASENAME" \
+      -printf '%T@\t%p\n' 2>/dev/null |
+      sort -nr |
+      head -n 1 |
+      cut -f2-
+  )"
+fi
+
+[[ -n "$SOURCE" && -f "$SOURCE" ]] ||
+  { printf 'ERROR=downloaded file not found in Termux-accessible storage: %s\n' "$INPUT" >&2; exit 1; }
+
+DEST="$DOWNLOAD_DIR/$(basename "$SOURCE")"
+if [[ "$SOURCE" != "$DEST" ]]; then
+  cp -p "$SOURCE" "$DEST"
+fi
+
+printf 'INGEST_STATUS=PASS\n'
+printf 'INSTANCE_ID=%s\n' "$INSTANCE_ID"
+printf 'SOURCE_FILE=%s\n' "$SOURCE"
+printf 'HARNESS_INBOX_FILE=%s\n' "$DEST"

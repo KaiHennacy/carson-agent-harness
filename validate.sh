@@ -23,14 +23,18 @@ printf '%s\n' "VALIDATION_BEGIN"
 required=(
   README.md
   install.sh
+  quick-install.sh
   validate.sh
   bin/carson-agent
+  bin/carson-chat-bootstrap
+  bin/carson-ingest
   lib/common.sh
   lib/listener.sh
   docs/INSTALLATION.md
   docs/INSTANCE_MODEL.md
   docs/ROUTING.md
   docs/SELF_PUBLISH.md
+  docs/ARBITRARY_LLM_CHAT.md
   examples/example.env
   .gitignore
 )
@@ -42,6 +46,9 @@ done
 bash -n install.sh
 bash -n validate.sh
 bash -n bin/carson-agent
+bash -n bin/carson-chat-bootstrap
+bash -n bin/carson-ingest
+bash -n quick-install.sh
 bash -n lib/common.sh
 bash -n lib/listener.sh
 

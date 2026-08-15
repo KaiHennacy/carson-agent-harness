@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+usage(){
+  printf 'Usage: %s <INSTANCE_ID> [OUTPUT_MD]\n' "$(basename "$0")" >&2
+  exit 64
+}
+
+[[ $# -ge 1 && $# -le 2 ]] || usage
+INSTANCE_ID="$1"
+REGISTRY_ROOT="${CARSON_REGISTRY_ROOT:-$HOME/.carson_agent_instances}"
+INDEX="$REGISTRY_ROOT/.registry/$INSTANCE_ID.env"
+[[ -f "$INDEX" ]] || { printf 'ERROR=unknown instance: %s\n' "$INSTANCE_ID" >&2; exit 1; }
+
+STATE_ROOT="$(
+  bash -c 'source "$1"; printf "%s" "${CARSON_STATE_ROOT:-}"' _ "$INDEX"
+)"
+[[ -f "$STATE_ROOT/instance.env" ]] ||
+  { printf 'ERROR=instance manifest missing\n' >&2; exit 1; }
+[[ -f "$STATE_ROOT/active-session.env" ]] ||
+  { printf 'ERROR=instance is not running; start it first\n' >&2; exit 1; }
+
+read_value(){
+  bash -c 'source "$1"; printf "%s" "${!2:-}"' _ "$1" "$2"
+}
+
+A_DIR="$(read_value "$STATE_ROOT/instance.env" CARSON_A_DIR)"
+B_DIR="$(read_value "$STATE_ROOT/instance.env" CARSON_B_DIR)"
+DOWNLOAD_DIR="$(read_value "$STATE_ROOT/instance.env" CARSON_DOWNLOAD_DIR)"
+SOURCE_ROOT="$(read_value "$STATE_ROOT/instance.env" CARSON_SOURCE_ROOT)"
+SESSION_ID="$(read_value "$STATE_ROOT/active-session.env" CARSON_SESSION_ID)"
+TASK_PREFIX="$(read_value "$STATE_ROOT/active-session.env" CARSON_TASK_PREFIX)"
+
+[[ -n "$A_DIR" && -n "$SESSION_ID" && -n "$TASK_PREFIX" ]] ||
+  { printf 'ERROR=incomplete active instance routing state\n' >&2; exit 1; }
+
+INGEST="$SOURCE_ROOT/bin/carson-ingest"
+OUTPUT="${2:-$HOME/storage/shared/CARSON_LLM_BOOTSTRAP_${INSTANCE_ID}_${SESSION_ID}.md}"
+mkdir -p "$(dirname "$OUTPUT")"
+
+cat > "$OUTPUT" <<EOF
+# CARSON arbitrary-LLM task bootstrap
+
+This attachment is the complete routing contract for a local Termux agent
+harness. Use it as authoritative context for tasks the user asks you to perform
+through that harness.
+
+## Active target
+
+- Protocol: \`CARSON_DOWNLOAD_AGENT_V1\`
+- Instance ID: \`$INSTANCE_ID\`
+- Session ID: \`$SESSION_ID\`
+- Required filename prefix: \`$TASK_PREFIX\`
+- Stable result file on this device: \`$A_DIR/NEXT_LLM_MESSAGE.txt\`
+
+Do not invent, shorten, replace, or reuse different instance/session values.
+If a later bootstrap attachment supplies new routing values, the newer
+attachment supersedes these values.
+
+## What to emit when the user gives you a task
+
+Create one genuinely downloadable executable shell artifact. Its filename must
+begin exactly with:
+
+\`$TASK_PREFIX\`
+
+and end in \`.sh\`. Use a descriptive task name plus a unique suffix after the
+prefix.
+
+The file must begin with these routing lines exactly:
+
+\`\`\`bash
+#!/data/data/com.termux/files/usr/bin/bash
+# CARSON_AGENT_PROTOCOL=CARSON_DOWNLOAD_AGENT_V1
+# CARSON_INSTANCE_ID=$INSTANCE_ID
+# CARSON_SESSION_ID=$SESSION_ID
+# CARSON_PAYLOAD_TYPE=NEXT_LLM_TASK
+\`\`\`
+
+Then implement the user's requested Termux-side task. Use
+\`set -Eeuo pipefail\` unless the task specifically requires different shell
+semantics.
+
+The payload's stdout becomes the next message returned through the harness, so
+print concise structured results and a useful \`NEXT_LLM_INSTRUCTION\` at the
+end. Errors should go to stderr and exit nonzero.
+
+Do not put passwords, access tokens, private keys, or other secret values into
+the downloadable task unless the user explicitly requires that exact handling.
+Prefer reading secrets from already-existing local files or environment state.
+
+## Response format
+
+When you emit a task, give the user:
+
+1. a short TL;DR;
+2. the downloadable \`.sh\` attachment;
+3. one Termux command that ingests the downloaded filename and waits for this
+   exact task's result.
+
+Because different AI clients may save attachments in different accessible
+locations, do not assume the client saved the file directly into the harness
+inbox. For a generated filename \`<ACTUAL_FILENAME>.sh\`, use this pattern:
+
+\`\`\`bash
+"$INGEST" "$INSTANCE_ID" "<ACTUAL_FILENAME>.sh"; timeout 120s sh -c 'until grep -Fq "SOURCE_FILE=<ACTUAL_FILENAME>.sh" "$A_DIR/NEXT_LLM_MESSAGE.txt" 2>/dev/null; do sleep 1; done'; cat "$A_DIR/NEXT_LLM_MESSAGE.txt"
+\`\`\`
+
+The ingest helper searches common Termux-accessible shared-storage download
+locations by exact filename and copies the file into the configured harness
+inbox when necessary. If an AI client stores its download in app-private
+storage that Termux cannot access, the user must first save/share the attachment
+into Termux-accessible shared storage or pass an accessible full path to the
+ingest helper.
+
+## Operating rule
+
+Once a task result is pasted back into the chat, treat the text between
+\`---BEGIN_NEXT_LLM_MESSAGE---\` and \`---END_NEXT_LLM_MESSAGE---\` as the next
+harness-produced context and continue toward the user's objective. Emit the
+next routed download file when another Termux-side step is required.
+EOF
+
+printf 'BOOTSTRAP_STATUS=PASS\n'
+printf 'INSTANCE_ID=%s\n' "$INSTANCE_ID"
+printf 'SESSION_ID=%s\n' "$SESSION_ID"
+printf 'TASK_PREFIX=%s\n' "$TASK_PREFIX"
+printf 'A_DIR=%s\n' "$A_DIR"
+printf 'DOWNLOAD_DIR=%s\n' "$DOWNLOAD_DIR"
+printf 'OUTPUT_MD=%s\n' "$OUTPUT"
