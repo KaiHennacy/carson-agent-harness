@@ -38,33 +38,47 @@ else
   BASENAME="$(basename "$INPUT")"
   [[ "$BASENAME" == "$INPUT" ]] || die "file path does not exist: $INPUT"
 
-  roots=()
-  for root in \
-    "$HOME/storage/downloads" \
-    "$HOME/storage/shared/Download" \
-    "$HOME/storage/shared/Downloads" \
-    "$HOME/storage/shared/Documents" \
-    "$HOME/storage/shared/carson-agent/C" \
-    "$HOME/storage/shared"
-  do
-    [[ -d "$root" ]] || continue
-    physical="$(cd "$root" && pwd -P)"
-    seen=NO
-    for existing in "${roots[@]:-}"; do
-      [[ "$existing" == "$physical" ]] && seen=YES
+  # Fast path for the normal case: an AI client saved the requested
+  # basename directly into this instance's configured Download inbox.
+  if [[ -f "$DOWNLOAD_DIR/$BASENAME" ]]; then
+    SOURCE="$DOWNLOAD_DIR/$BASENAME"
+  else
+    roots=()
+    for root in \
+      "$HOME/storage/downloads" \
+      "$HOME/storage/shared/Download" \
+      "$HOME/storage/shared/Downloads" \
+      "$HOME/storage/shared/Documents" \
+      "$HOME/storage/shared/carson-agent/C" \
+      "$HOME/storage/shared"
+    do
+      [[ -d "$root" ]] || continue
+      physical="$(cd "$root" && pwd -P)"
+      seen=NO
+      for existing in "${roots[@]:-}"; do
+        [[ "$existing" == "$physical" ]] && seen=YES
+      done
+      [[ "$seen" == "NO" ]] && roots+=("$physical")
     done
-    [[ "$seen" == "NO" ]] && roots+=("$physical")
-  done
 
-  [[ ${#roots[@]} -gt 0 ]] || die "no Termux-accessible shared-storage roots"
+    [[ ${#roots[@]} -gt 0 ]] || die "no Termux-accessible shared-storage roots"
 
-  SOURCE="$(
-    find "${roots[@]}" -maxdepth 4 -type f -name "$BASENAME" \
-      -printf '%T@\t%p\n' 2>/dev/null |
-    sort -nr |
-    head -n 1 |
-    cut -f2-
-  )"
+    # Search each root independently. An unreadable descendant must not make
+    # basename discovery fail under set -o pipefail when another root matches.
+    candidates="$(mktemp "$STATE_ROOT/.ingest-candidates.XXXXXX")"
+    trap 'rm -f "$candidates"' EXIT
+    for root in "${roots[@]}"; do
+      find "$root" -maxdepth 4 -type f -name "$BASENAME" \
+        -printf '%T@\t%p\n' 2>/dev/null >> "$candidates" || true
+    done
+    SOURCE="$(
+      sort -nr "$candidates" 2>/dev/null |
+      head -n 1 |
+      cut -f2-
+    )"
+    rm -f "$candidates"
+    trap - EXIT
+  fi
 fi
 
 [[ -n "$SOURCE" && -f "$SOURCE" ]] || die "input file not found: $INPUT"
