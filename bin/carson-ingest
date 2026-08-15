@@ -130,6 +130,10 @@ TMP="$STATE_ROOT/.wrap.$$.tmp"
   printf '%s\n' '# CARSON_PAYLOAD_TYPE=NEXT_LLM_TASK'
   printf '# CARSON_WRAPPED_SOURCE_SHA256=%s\n' "$SOURCE_SHA"
   printf '# CARSON_WRAPPED_SOURCE_BASENAME=%s\n' "$SOURCE_BASE"
+  # This inert per-submission token makes repeated submissions of the same
+  # plain source byte-distinct. The listener intentionally deduplicates by
+  # payload SHA-256, so wrapper content must carry submission identity.
+  printf '# CARSON_WRAPPER_TOKEN=%s\n' "$TOKEN"
   printf '\n'
   first="$(head -n 1 "$SOURCE" || true)"
   if [[ "$first" == '#!'* ]]; then
