@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+usage(){
+  cat >&2 <<'EOF'
+Usage:
+  carson-prompt [--print-only] <task...>
+  printf '%s\n' "<task>" | carson-prompt [--print-only]
+
+Creates a direct user message asking an arbitrary AI chat to return an actual
+downloadable Termux .sh file for the supplied task.
+EOF
+  exit 64
+}
+
+PRINT_ONLY=0
+if [[ "${1:-}" == "--print-only" ]]; then
+  PRINT_ONLY=1
+  shift
+fi
+
+if [[ $# -gt 0 ]]; then
+  TASK="$*"
+elif [[ ! -t 0 ]]; then
+  TASK="$(cat)"
+else
+  usage
+fi
+
+[[ -n "${TASK//[[:space:]]/}" ]] || {
+  printf 'ERROR=task is empty\n' >&2
+  exit 64
+}
+
+PROMPT="$(
+  cat <<EOF
+I am directly asking you to create an actual downloadable Termux Bash .sh file attachment that performs the task below.
+
+TASK:
+$TASK
+
+Requirements:
+- Return the actual .sh file as a downloadable attachment in this response, not only a fenced code block.
+- Target Termux on Android and use this shebang: #!/data/data/com.termux/files/usr/bin/bash
+- Make the script transparent and readable.
+- If the task depends on information from my device, make the script inspect and report that information rather than guessing it.
+- Unless I explicitly authorize destructive changes in the task, keep the script non-destructive. For cleanup-oriented tasks, report candidates, sizes, and useful evidence without deleting files.
+- Do not ask me to manually reconstruct the script from a code block.
+- Give the file a short descriptive .sh filename.
+EOF
+)"
+
+CLIPBOARD_STATUS="NOT_ATTEMPTED"
+if (( PRINT_ONLY == 0 )) && command -v termux-clipboard-set >/dev/null 2>&1; then
+  if printf '%s' "$PROMPT" | termux-clipboard-set >/dev/null 2>&1; then
+    CLIPBOARD_STATUS="SET"
+  else
+    CLIPBOARD_STATUS="FAILED"
+  fi
+elif (( PRINT_ONLY == 0 )); then
+  CLIPBOARD_STATUS="UNAVAILABLE"
+else
+  CLIPBOARD_STATUS="PRINT_ONLY"
+fi
+
+printf '%s\n' \
+  "CARSON_PROMPT_ADAPTER_V1" \
+  "CLIPBOARD=$CLIPBOARD_STATUS" \
+  "---BEGIN_DIRECT_USER_MESSAGE---"
+printf '%s\n' "$PROMPT"
+printf '%s\n' "---END_DIRECT_USER_MESSAGE---"

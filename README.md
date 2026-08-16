@@ -108,3 +108,18 @@ bin/carson-submit <INSTANCE_ID> <DOWNLOADED_FILE.sh>
 the user's device. Already-routed CARSON task files continue to pass through.
 
 See `docs/ABC_STORAGE.md`.
+
+## Direct prompt adapter for arbitrary chats
+
+Uploaded reference files are not a reliable place to specify response behavior
+for arbitrary models. Generate the file-artifact request as part of the direct
+user message instead:
+
+```bash
+bin/carson-prompt "your task here"
+```
+
+When Termux clipboard support is available, the generated direct message is
+also copied to the Android clipboard. Paste it into the arbitrary chat, download
+the ordinary `.sh` returned by that chat, and submit it locally with
+`carson-submit`.

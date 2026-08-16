@@ -134,3 +134,17 @@ if command -v git >/dev/null 2>&1 && [[ -d .git ]]; then
 fi
 
 printf '%s\n' "VALIDATION_STATUS=PASS"
+
+# Direct-prompt adapter regression checks.
+[[ -x bin/carson-prompt ]] || {
+  printf 'VALIDATION_FAIL=bin/carson-prompt missing or not executable\n' >&2
+  exit 1
+}
+bash -n bin/carson-prompt || {
+  printf 'VALIDATION_FAIL=bin/carson-prompt syntax\n' >&2
+  exit 1
+}
+[[ -f docs/ARBITRARY_CHAT_PROMPT_ADAPTER.md ]] || {
+  printf 'VALIDATION_FAIL=direct prompt adapter documentation missing\n' >&2
+  exit 1
+}
