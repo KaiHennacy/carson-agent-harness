@@ -123,3 +123,7 @@ When Termux clipboard support is available, the generated direct message is
 also copied to the Android clipboard. Paste it into the arbitrary chat, download
 the ordinary `.sh` returned by that chat, and submit it locally with
 `carson-submit`.
+
+The adapter preserves the supplied task text unchanged and separately requests a
+minimal arbitrary-chat response: only a 1-3 sentence TL;DR plus the downloadable
+`.sh` attachment.

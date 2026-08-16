@@ -18,3 +18,8 @@ Paste the generated direct message into an arbitrary chat that supports file
 attachments. No CARSON routing or listener information is exposed to that chat.
 
 After downloading the returned `.sh`, submit it locally with `carson-submit`.
+
+By default, the generated direct user message also requires the arbitrary chat's
+visible response to contain only a 1-3 sentence TL;DR plus the actual downloadable
+`.sh` attachment. The original task text is inserted unchanged into the `TASK:`
+block; response-format requirements are added separately.
