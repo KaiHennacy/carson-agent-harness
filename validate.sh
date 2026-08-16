@@ -158,3 +158,22 @@ grep -Fq 'install -m 755 "$ROOT/bin/carson-prompt" "$PREFIX/bin/carson-prompt"' 
   printf 'VALIDATION_FAIL=quick-install does not install carson-prompt into PREFIX/bin\n' >&2
   exit 1
 }
+
+
+# AUTO_PLAIN_INGEST_CONTRACT_V1
+grep -Fq '# CARSON_AUTO_INGEST_ARM_V1' bin/carson-prompt || {
+  printf 'VALIDATION_FAIL=carson-prompt auto-ingest arming missing\n' >&2
+  exit 1
+}
+grep -Fq '# CARSON_AUTO_PLAIN_INGEST_V1' lib/listener.sh || {
+  printf 'VALIDATION_FAIL=listener plain-script ingestion missing\n' >&2
+  exit 1
+}
+grep -Fq '"$ingest" "$CARSON_INSTANCE_ID" "$source_file"' lib/listener.sh || {
+  printf 'VALIDATION_FAIL=listener does not route plain scripts through carson-ingest\n' >&2
+  exit 1
+}
+grep -Fq "! -name 'CARSON_AGENT_*'" lib/listener.sh || {
+  printf 'VALIDATION_FAIL=auto-ingest does not exclude routed CARSON tasks\n' >&2
+  exit 1
+}

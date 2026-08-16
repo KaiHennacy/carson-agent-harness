@@ -23,3 +23,21 @@ By default, the generated direct user message also requires the arbitrary chat's
 visible response to contain only a 1-3 sentence TL;DR plus the actual downloadable
 `.sh` attachment. The original task text is inserted unchanged into the `TASK:`
 block; response-format requirements are added separately.
+
+
+## Automatic plain-script ingestion
+
+A normal `carson-prompt` invocation arms the single active CARSON instance.
+Existing `.sh` files in Downloads are excluded by the arming cursor. The
+listener automatically takes the next new ordinary `.sh` downloaded from the
+LLM, routes it through the existing `carson-ingest` bridge, and executes the
+resulting routed task.
+
+The cursor advances after each successful ingestion and remains active for the
+following LLM turn. Therefore the intended loop does not require
+`carson-submit`: run `carson-prompt` once, download each LLM-produced `.sh`,
+then return `A/NEXT_LLM_MESSAGE.txt` to the same chat for the next turn.
+
+Already-routed `CARSON_AGENT_*` files are excluded. If multiple CARSON
+instances are active, `carson-prompt` fails closed unless `CARSON_INSTANCE_ID`
+is explicitly selected.

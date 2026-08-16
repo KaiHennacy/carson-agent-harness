@@ -115,6 +115,44 @@ emit_next_message() {
   mv -f "$tmp" "$CARSON_A_DIR/NEXT_LLM_MESSAGE.txt"
 }
 
+# CARSON_AUTO_PLAIN_INGEST_V1
+auto_ingest_plain_candidate() {
+  local source_file="$1"
+  local cursor="$STATE_ROOT/auto-ingest.cursor"
+  local ingest="$CARSON_SOURCE_ROOT/bin/carson-ingest"
+  local base size_before size_after rc
+
+  [[ -f "$cursor" && -f "$source_file" ]] || return 0
+  [[ "$source_file" -nt "$cursor" ]] || return 0
+
+  base="$(basename "$source_file")"
+  [[ "$base" == *.sh ]] || return 0
+  [[ "$base" != CARSON_AGENT_* ]] || return 0
+
+  [[ -x "$ingest" ]] || {
+    log_event "AUTO_INGEST_FAIL reason=INGEST_UNAVAILABLE file=$base"
+    return 0
+  }
+
+  size_before="$(stat -c '%s' -- "$source_file" 2>/dev/null || true)"
+  [[ -n "$size_before" ]] || return 0
+  sleep 1
+  size_after="$(stat -c '%s' -- "$source_file" 2>/dev/null || true)"
+  [[ "$size_before" == "$size_after" ]] || {
+    log_event "AUTO_INGEST_DEFER reason=FILE_UNSTABLE file=$base"
+    return 0
+  }
+
+  if "$ingest" "$CARSON_INSTANCE_ID" "$source_file" \
+      > "$SESSION_DIR/auto-ingest.last.log" 2>&1; then
+    touch "$cursor"
+    log_event "AUTO_INGEST_PASS file=$base"
+  else
+    rc=$?
+    log_event "AUTO_INGEST_FAIL rc=$rc file=$base"
+  fi
+}
+
 process_candidate() {
   local file="$1" sha rc out err
 
@@ -145,6 +183,22 @@ process_candidate() {
 
 process_latest_matching_unseen() {
   local entry file rc
+
+  # While armed, route the next future ordinary .sh through the existing
+  # carson-ingest bridge. Only one plain artifact is accepted per cursor
+  # position; successful ingestion advances the cursor for the following turn.
+  if [[ -f "$STATE_ROOT/auto-ingest.cursor" ]]; then
+    while IFS= read -r -d '' plain_file; do
+      auto_ingest_plain_candidate "$plain_file"
+      break
+    done < <(
+      find "$CARSON_DOWNLOAD_DIR" -maxdepth 1 -type f \
+        -name '*.sh' \
+        ! -name 'CARSON_AGENT_*' \
+        -newer "$STATE_ROOT/auto-ingest.cursor" \
+        -print0 2>/dev/null
+    )
+  fi
 
   while IFS= read -r -d '' entry; do
     file="${entry#*$'\t'}"

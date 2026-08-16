@@ -1,5 +1,74 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+# CARSON_AUTO_INGEST_ARM_V1
+# Normal carson-prompt invocations arm one active instance for future plain
+# .sh downloads. --print-only remains side-effect free.
+_CARSON_PROMPT_INITIAL_FIRST_ARG="${1:-}"
+
+_carson_prompt_state_from_index() {
+  bash -c 'source "$1"; printf "%s" "${CARSON_STATE_ROOT:-}"' _ "$1"
+}
+
+_carson_prompt_arm_auto_ingest() {
+  [[ "$_CARSON_PROMPT_INITIAL_FIRST_ARG" == "--print-only" ]] && return 0
+
+  local registry_root="${CARSON_REGISTRY_ROOT:-$HOME/.carson_agent_instances}"
+  local registry_dir="$registry_root/.registry"
+  local index="" state="" candidate candidate_state
+  local -a active_indexes=()
+
+  if [[ -n "${CARSON_INSTANCE_ID:-}" ]]; then
+    index="$registry_dir/$CARSON_INSTANCE_ID.env"
+    [[ -f "$index" ]] || {
+      printf 'ERROR=unknown CARSON_INSTANCE_ID: %s\n' "$CARSON_INSTANCE_ID" >&2
+      return 1
+    }
+  else
+    shopt -s nullglob
+    for candidate in "$registry_dir"/*.env; do
+      candidate_state="$(_carson_prompt_state_from_index "$candidate")"
+      [[ -n "$candidate_state" && -f "$candidate_state/active-session.env" ]] &&
+        active_indexes+=("$candidate")
+    done
+    shopt -u nullglob
+
+    (( ${#active_indexes[@]} > 0 )) || {
+      printf 'ERROR=no active CARSON instance available for automatic ingestion\n' >&2
+      return 1
+    }
+    (( ${#active_indexes[@]} == 1 )) || {
+      printf 'ERROR=multiple active CARSON instances; export CARSON_INSTANCE_ID before carson-prompt\n' >&2
+      return 1
+    }
+    index="${active_indexes[0]}"
+  fi
+
+  state="$(_carson_prompt_state_from_index "$index")"
+  [[ -n "$state" && -f "$state/active-session.env" ]] || {
+    printf 'ERROR=selected CARSON instance has no active session\n' >&2
+    return 1
+  }
+
+  local cursor="$state/auto-ingest.cursor"
+  local tmp="$state/.auto-ingest.cursor.$$"
+  printf 'ARMED_AT_UTC=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$tmp"
+  mv -f "$tmp" "$cursor"
+
+  printf 'AUTO_INGEST=ARMED\n' >&2
+  printf 'AUTO_INGEST_STATE_ROOT=%s\n' "$state" >&2
+}
+
+_carson_prompt_exit_hook() {
+  local rc=$?
+  trap - EXIT
+  if (( rc == 0 )); then
+    if ! _carson_prompt_arm_auto_ingest; then
+      rc=1
+    fi
+  fi
+  exit "$rc"
+}
+trap _carson_prompt_exit_hook EXIT
 
 usage(){
   cat >&2 <<'EOF'
