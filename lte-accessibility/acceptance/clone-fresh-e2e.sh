@@ -687,30 +687,127 @@ say
 
 STAGE="INITIAL_SEND"
 phase_begin INITIAL_SEND
-say "=== SEND BODY-ONLY INITIAL PROMPT EXACTLY ONCE ==="
-set_text_exact_retry "$BODY" "INITIAL_BODY" >/dev/null ||
-    fail 70 "could not set and exactly verify initial body after bounded retries" "DO_NOT_SEND;RETURN_THIS_OUTPUT"
-say "INITIAL_BODY_VERIFY=PASS"
+say "=== SEND BODY-ONLY INITIAL PROMPT WITH STABLE-ROLLBACK RECOVERY ==="
 
-click_exact "Send" || fail 73 "initial Send failed"
-say "INITIAL_SEND_TAP_COUNT=1"
+BODY_TEXT="$(cat "$BODY")"
+SEND_ACTION_ATTEMPTS=0
+CONFIRMED_ROLLBACKS=0
+FIRST_ARTIFACT_READY=0
+MAX_SEND_ATTEMPTS=3
+ROLLBACK_STABLE_POLLS_REQUIRED=3
 
-POST="$TMPBASE/post-initial.txt"
-snapshot_retry "$POST" "INITIAL_POST_SEND_SNAPSHOT" ||
-    fail 74 "initial post-send snapshot unavailable" "DO_NOT_RESEND"
+for send_round in $(seq 1 "$MAX_SEND_ATTEMPTS"); do
+    if (( send_round == 1 )); then
+        set_text_exact_retry "$BODY" "INITIAL_BODY" >/dev/null ||
+            fail 70 "could not set and exactly verify initial body after bounded retries" "DO_NOT_SEND;RETURN_THIS_OUTPUT"
+        say "INITIAL_BODY_VERIFY=PASS"
+    else
+        PRE="$TMPBASE/pre-retry-send-$send_round.txt"
+        snapshot_retry "$PRE" "PRE_RETRY_SEND_SNAPSHOT[$send_round]" ||
+            fail 71 "could not verify rollback state before retry" "DO_NOT_RESEND"
+        PEDIT="$(decoded_edit "$PRE")"
+        PCOUNT="$(printf '%s\n' "$PEDIT"|sed -n 's/^COUNT=//p')"
+        PTEXT="$(printf '%s\n' "$PEDIT"|sed -n 's/^TEXT=//p')"
+        PSEND="$(decoded_exact_count "$PRE" "Send")"
+        PCODE="$(decoded_exact_count "$PRE" "Code · SH")"
+        PSTOP="$(decoded_exact_count "$PRE" "Stop response")"
+        [[ "$PCOUNT" == 1 && "$PTEXT" == "$BODY_TEXT" && "$PSEND" == 1 && "$PCODE" == 0 && "$PSTOP" == 0 ]] ||
+            fail 72 "retry precondition is not a stable exact restored-draft rollback" "DO_NOT_RESEND"
+        say "SEND_RETRY_PRECONDITION[$send_round]=STABLE_CONFIRMED_ROLLBACK"
+    fi
 
-POST_EDIT="$(decoded_edit "$POST")"
-POST_TEXT="$(printf '%s\n' "$POST_EDIT"|sed -n 's/^TEXT=//p')"
-[[ -z "$POST_TEXT" ]] ||
-    fail 75 "composer did not clear after initial Send" "DO_NOT_RESEND"
+    click_exact "Send" || fail 73 "initial Send action failed"
+    SEND_ACTION_ATTEMPTS=$((SEND_ACTION_ATTEMPTS+1))
+    say "INITIAL_SEND_ACTION_ATTEMPT=$SEND_ACTION_ATTEMPTS"
+
+    # V37 showed that this first snapshot can be transitional even when Send
+    # ultimately succeeds. Record it, but do not decide success/failure from it.
+    POST="$TMPBASE/post-initial-$send_round.txt"
+    if snapshot_retry "$POST" "INITIAL_POST_SEND_SNAPSHOT[$send_round]"; then
+        PEDIT="$(decoded_edit "$POST")"
+        PTEXT="$(printf '%s\n' "$PEDIT"|sed -n 's/^TEXT=//p')"
+        if [[ -z "$PTEXT" ]]; then
+            say "INITIAL_POST_SEND_STATE[$send_round]=COMPOSER_EMPTY"
+        elif [[ "$PTEXT" == "$BODY_TEXT" ]]; then
+            say "INITIAL_POST_SEND_STATE[$send_round]=EXACT_DRAFT_PRESENT"
+        else
+            say "INITIAL_POST_SEND_STATE[$send_round]=TRANSITIONAL_NONEMPTY"
+        fi
+    else
+        say "INITIAL_POST_SEND_STATE[$send_round]=SNAPSHOT_UNAVAILABLE_CONTINUE_OBSERVING"
+    fi
+
+    stable_rollback_polls=0
+
+    # Up to 240 seconds per Send attempt. Most responses arrive much sooner,
+    # but a slow Claude generation must not be mistaken for a failed Send.
+    for response_poll in $(seq 1 48); do
+        if wait_exact 5000 "Code · SH"; then
+            FIRST_ARTIFACT_READY=1
+            say "FIRST_ARTIFACT_EVENT[$send_round]=PASS poll=$response_poll"
+            break 2
+        fi
+
+        WATCH="$TMPBASE/send-watch-${send_round}-${response_poll}.txt"
+        if ! snapshot_retry "$WATCH" "SEND_WATCH_SNAPSHOT[$send_round/$response_poll]"; then
+            stable_rollback_polls=0
+            say "SEND_WATCH[$send_round/$response_poll]=SNAPSHOT_UNAVAILABLE"
+            continue
+        fi
+
+        WEDIT="$(decoded_edit "$WATCH")"
+        WCOUNT="$(printf '%s\n' "$WEDIT"|sed -n 's/^COUNT=//p')"
+        WTEXT="$(printf '%s\n' "$WEDIT"|sed -n 's/^TEXT=//p')"
+        WSEND="$(decoded_exact_count "$WATCH" "Send")"
+        WCODE="$(decoded_exact_count "$WATCH" "Code · SH")"
+        WSTOP="$(decoded_exact_count "$WATCH" "Stop response")"
+
+        if (( WCODE >= 1 )); then
+            FIRST_ARTIFACT_READY=1
+            say "FIRST_ARTIFACT_SNAPSHOT[$send_round]=PASS poll=$response_poll"
+            break 2
+        fi
+
+        if (( WSTOP >= 1 )); then
+            stable_rollback_polls=0
+            say "SEND_WATCH[$send_round/$response_poll]=GENERATION_ACTIVE"
+            continue
+        fi
+
+        if [[ "$WCOUNT" == 1 && "$WTEXT" == "$BODY_TEXT" && "$WSEND" == 1 && "$WCODE" == 0 && "$WSTOP" == 0 ]]; then
+            stable_rollback_polls=$((stable_rollback_polls+1))
+            say "ROLLBACK_CANDIDATE[$send_round]=$stable_rollback_polls/$ROLLBACK_STABLE_POLLS_REQUIRED poll=$response_poll"
+            if (( stable_rollback_polls >= ROLLBACK_STABLE_POLLS_REQUIRED )); then
+                CONFIRMED_ROLLBACKS=$((CONFIRMED_ROLLBACKS+1))
+                say "CONFIRMED_SEND_ROLLBACK[$send_round]=YES stable_polls=$stable_rollback_polls"
+                break
+            fi
+            continue
+        fi
+
+        stable_rollback_polls=0
+        if [[ "$WCOUNT" == 1 && -z "$WTEXT" ]]; then
+            say "SEND_WATCH[$send_round/$response_poll]=COMPOSER_EMPTY_WAITING"
+        elif [[ "$WCOUNT" == 1 && -n "$WTEXT" ]]; then
+            say "SEND_WATCH[$send_round/$response_poll]=TRANSITIONAL_NONEMPTY_WAITING"
+        else
+            say "SEND_WATCH[$send_round/$response_poll]=OTHER_TRANSITIONAL_WAITING"
+        fi
+    done
+done
+
+(( FIRST_ARTIFACT_READY == 1 )) ||
+    fail 80 "Claude did not return first .sh artifact after bounded slow-response and stable-rollback recovery"
+
+say "INITIAL_SEND_ACTION_ATTEMPTS=$SEND_ACTION_ATTEMPTS"
+say "CONFIRMED_SEND_ROLLBACKS=$CONFIRMED_ROLLBACKS"
 say "INITIAL_SEND_CONSUMED=PASS"
 phase_end INITIAL_SEND
 say
 
 STAGE="FIRST_RESPONSE"
 phase_begin FIRST_RESPONSE
-say "=== WAIT FIRST ARTIFACT RESPONSE ==="
-wait_exact 120000 "Code · SH"||fail 80 "Claude did not return first .sh artifact"
+say "=== VERIFY FIRST ARTIFACT RESPONSE ==="
 CHAT="$TMPBASE/first-response.txt";snapshot "$CHAT"||fail 81 "first response snapshot failed"
 (( $(decoded_exact_count "$CHAT" "Code · SH")>=1 ))||fail 82 "Code · SH vanished"
 say "FIRST_ARTIFACT_RESPONSE=PASS"
@@ -719,7 +816,7 @@ say
 
 STAGE="BIND_CHAT"
 phase_begin BIND_CHAT
-say "=== DETERMINISTICALLY BIND FRESH CHAT ==="
+say "=== DETERMINISTICALLY BIND CURRENT FRESH CHAT DIRECTLY ==="
 ROUTE_HEX="$(python - <<'PY'
 import secrets
 print(secrets.token_hex(8).upper())
@@ -728,91 +825,108 @@ PY
 BOUND_TITLE="CARSON $ROUTE_HEX"
 ROUTE_KEY="CARSON_ROUTE_$ROUTE_HEX"
 
-wait_exact 15000 "Open menu"||fail 90 "Open menu not ready for binding"
-click_exact "Open menu"||fail 91 "Open menu click failed"
-wait_exact 10000 "Recents"||fail 92 "Recents absent"
-DRAWER="$TMPBASE/drawer.txt";snapshot "$DRAWER"||fail 93 "drawer snapshot failed"
-OLD_TITLE="$(newest_recent_title "$DRAWER" 2>/dev/null||true)"
-say "CLAUDE_GENERATED_TITLE=${OLD_TITLE:-UNRESOLVED}"
-[[ -n "$OLD_TITLE" ]]||fail 94 "newest Recent title unresolved"
-long_click_exact "$OLD_TITLE"||fail 95 "newest chat long-click failed"
-wait_exact 10000 "Rename"||fail 96 "Rename action missing"
-click_exact "Rename"||fail 97 "Rename action click failed"
+# We are already inside the exact fresh chat that just produced the artifact.
+# Do not leave it and try to rediscover it through Recents, because repeated
+# acceptance runs can have identical Claude-generated titles.
+CURRENT="$TMPBASE/current-fresh-before-bind.txt"
+snapshot_retry "$CURRENT" "CURRENT_FRESH_BEFORE_BIND_SNAPSHOT" ||
+    fail 90 "could not snapshot current fresh chat before binding"
+
+(( $(decoded_exact_count "$CURRENT" "Add to chat") == 1 )) ||
+    fail 91 "current surface is not a chat composer before binding"
+(( $(decoded_exact_count "$CURRENT" "Code · SH") >= 1 )) ||
+    fail 92 "current chat does not contain the fresh artifact before binding"
+
+MORE_COUNT="$(decoded_exact_count "$CURRENT" "More options")"
+say "CURRENT_CHAT_MORE_OPTIONS_COUNT=$MORE_COUNT"
+(( MORE_COUNT >= 1 )) ||
+    fail 93 "current fresh chat exposes no More options control"
+
+# The current-conversation overflow is the topmost More options control.
+# BUILD5 directional click removes ambiguity if another lower control exists.
+click_top "More options" ||
+    fail 94 "current fresh chat top More options could not be activated"
+
+wait_exact 10000 "Rename" ||
+    fail 95 "Rename action missing from current fresh chat More options"
+
+say "BIND_ROUTE=CURRENT_FRESH_CHAT_TOP_MORE_OPTIONS_RENAME"
+click_exact "Rename" || fail 96 "Rename action click failed"
+
 TITLE_FILE="$TMPBASE/title.txt";printf '%s' "$BOUND_TITLE">"$TITLE_FILE"
 bridge_capture 15 set-text-file "$TITLE_FILE"
 say "RENAME_SET_TEXT=$(bridge_show)"
-bridge_ok||fail 98 "rename SET_TEXT failed"
-REN="$TMPBASE/rename.txt";snapshot "$REN"||fail 99 "rename verification snapshot failed"
-[[ "$(decoded_edit "$REN"|sed -n 's/^TEXT=//p')" == "$BOUND_TITLE" ]]||fail 100 "rename text mismatch"
-click_exact "Rename"||fail 101 "rename confirmation failed"
+bridge_ok||fail 97 "rename SET_TEXT failed"
 
-# Claude leaves the navigation drawer open after a successful rename on the
-# current app build. Do not press Back blindly. Classify the post-rename UI and
-# take the shortest semantic route back to the just-bound chat.
+REN="$TMPBASE/rename.txt";snapshot "$REN"||fail 98 "rename verification snapshot failed"
+[[ "$(decoded_edit "$REN"|sed -n 's/^TEXT=//p')" == "$BOUND_TITLE" ]]||
+    fail 99 "rename text mismatch"
+
+click_exact "Rename"||fail 100 "rename confirmation failed"
+
+# Claude may leave an overflow/menu/drawer surface open after rename.
+# Classify and return semantically without assuming Back is required.
 nap_ms 250
 POST_RENAME="$TMPBASE/post-rename.txt"
-snapshot "$POST_RENAME"||fail 102 "post-rename snapshot failed"
+snapshot "$POST_RENAME"||fail 101 "post-rename snapshot failed"
 
 PR_ADD="$(decoded_exact_count "$POST_RENAME" "Add to chat")"
 PR_BOUND="$(decoded_exact_count "$POST_RENAME" "$BOUND_TITLE")"
 PR_MENU="$(decoded_exact_count "$POST_RENAME" "Open menu")"
-PR_CHATS="$(decoded_exact_count "$POST_RENAME" "Chats")"
 PR_RENAME="$(decoded_exact_count "$POST_RENAME" "Rename")"
 
-say "POST_RENAME_STATE=ADD_TO_CHAT:$PR_ADD BOUND_TITLE:$PR_BOUND OPEN_MENU:$PR_MENU CHATS:$PR_CHATS RENAME:$PR_RENAME"
+say "POST_RENAME_STATE=ADD_TO_CHAT:$PR_ADD BOUND_TITLE:$PR_BOUND OPEN_MENU:$PR_MENU RENAME:$PR_RENAME"
 
-if (( PR_ADD == 1 && PR_BOUND == 0 )); then
+if (( PR_ADD == 1 )); then
     say "POST_RENAME_ROUTE=ALREADY_IN_BOUND_CHAT"
-elif (( PR_BOUND == 1 )); then
-    say "POST_RENAME_ROUTE=DRAWER_EXACT_BOUND_TITLE"
-    click_exact "$BOUND_TITLE"||fail 103 "bound title visible after rename but could not be opened"
-    wait_exact 15000 "Add to chat"||fail 104 "bound chat did not open after direct drawer selection"
+elif (( PR_BOUND >= 1 )); then
+    say "POST_RENAME_ROUTE=BOUND_TITLE_VISIBLE_SELECT"
+    click_exact "$BOUND_TITLE"||fail 102 "bound title visible after rename but could not be opened"
+    wait_exact 15000 "Add to chat"||fail 103 "bound chat did not open after title selection"
 elif (( PR_MENU == 1 )); then
     say "POST_RENAME_ROUTE=OPEN_DRAWER_THEN_BOUND_TITLE"
-    click_exact "Open menu"||fail 105 "post-rename Open menu could not be activated"
-    wait_exact 10000 "$BOUND_TITLE"||fail 106 "bound title did not appear in drawer after rename"
-    click_exact "$BOUND_TITLE"||fail 107 "bound title could not be activated after opening drawer"
-    wait_exact 15000 "Add to chat"||fail 108 "bound chat did not open after drawer selection"
-else
-    # A remaining rename/dialog surface is the only case where Back is allowed.
-    if (( PR_RENAME >= 1 )); then
-        say "POST_RENAME_ROUTE=DISMISS_REMAINING_RENAME_SURFACE"
-        bridge_capture 8 back
-        say "POST_RENAME_BACK=$(bridge_show)"
-        nap_ms 250
-        POST2="$TMPBASE/post-rename-back.txt"
-        snapshot "$POST2"||fail 109 "post-rename Back verification snapshot failed"
-        if (( $(decoded_exact_count "$POST2" "$BOUND_TITLE") == 1 )); then
-            click_exact "$BOUND_TITLE"||fail 110 "bound title could not be opened after rename-surface dismissal"
-            wait_exact 15000 "Add to chat"||fail 111 "bound chat did not open after rename-surface dismissal"
-        elif (( $(decoded_exact_count "$POST2" "Add to chat") == 1 )); then
-            say "POST_RENAME_ROUTE=BACK_RETURNED_TO_BOUND_CHAT"
-        else
-            fail 112 "post-rename state remained unresolved after one bounded Back"
-        fi
+    click_exact "Open menu"||fail 104 "post-rename Open menu could not be activated"
+    wait_exact 10000 "$BOUND_TITLE"||fail 105 "bound title did not appear in drawer"
+    click_exact "$BOUND_TITLE"||fail 106 "bound title could not be activated from drawer"
+    wait_exact 15000 "Add to chat"||fail 107 "bound chat did not open from drawer"
+elif (( PR_RENAME >= 1 )); then
+    say "POST_RENAME_ROUTE=DISMISS_REMAINING_RENAME_SURFACE"
+    bridge_capture 8 back
+    say "POST_RENAME_BACK=$(bridge_show)"
+    nap_ms 250
+    POST2="$TMPBASE/post-rename-back.txt"
+    snapshot "$POST2"||fail 108 "post-rename Back verification snapshot failed"
+    if (( $(decoded_exact_count "$POST2" "Add to chat") == 1 )); then
+        say "POST_RENAME_ROUTE=BACK_RETURNED_TO_BOUND_CHAT"
+    elif (( $(decoded_exact_count "$POST2" "$BOUND_TITLE") >= 1 )); then
+        click_exact "$BOUND_TITLE"||fail 109 "bound title could not be opened after dismissing rename surface"
+        wait_exact 15000 "Add to chat"||fail 110 "bound chat did not open after dismissing rename surface"
     else
-        fail 113 "post-rename state exposed neither bound chat nor drawer route"
+        fail 111 "post-rename state unresolved after bounded Back"
     fi
+else
+    fail 112 "post-rename state exposed no safe route to bound chat"
 fi
 
 BOUND_VERIFY="$TMPBASE/bound-after-rename.txt"
-snapshot "$BOUND_VERIFY"||fail 114 "bound-chat post-rename verification snapshot failed"
+snapshot "$BOUND_VERIFY"||fail 113 "bound-chat post-rename verification snapshot failed"
 (( $(decoded_exact_count "$BOUND_VERIFY" "Add to chat") == 1 ))||
-    fail 115 "post-rename routing did not land in a chat composer"
+    fail 114 "post-rename routing did not land in a chat composer"
 (( $(decoded_exact_count "$BOUND_VERIFY" "Code · SH") >= 1 ))||
-    fail 116 "post-rename routing landed in a chat without the fresh V9 artifact"
+    fail 115 "post-rename routing landed in a chat without the fresh artifact"
 say "POST_RENAME_BOUND_CHAT_VERIFY=PASS"
 
 mkdir -p "$(dirname "$BINDING")"
 {
-    printf 'BINDING_VERSION=%q\n' "4"
+    printf 'BINDING_VERSION=%q\n' "6"
     printf 'BINDING_STATE=%q\n' "BOUND"
     printf 'CLAUDE_CHAT_TITLE=%q\n' "$BOUND_TITLE"
     printf 'CLAUDE_CHAT_ROUTE_KEY=%q\n' "$ROUTE_KEY"
-    printf 'CLAUDE_CHAT_OLD_TITLE=%q\n' "$OLD_TITLE"
+    printf 'CLAUDE_CHAT_OLD_TITLE=%q\n' "CURRENT_CHAT_DIRECT"
     printf 'CREATED_AT_UTC=%q\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 } > "$BINDING"
 chmod 600 "$BINDING"
+
 say "BOUND_CHAT_TITLE=$BOUND_TITLE"
 say "DETERMINISTIC_CHAT_BINDING=PASS"
 say "POST_RENAME_SEMANTIC_RETURN=PASS"

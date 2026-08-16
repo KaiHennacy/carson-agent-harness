@@ -127,3 +127,14 @@ the ordinary `.sh` returned by that chat, and submit it locally with
 The adapter preserves the supplied task text unchanged and separately requests a
 minimal arbitrary-chat response: only a 1-3 sentence TL;DR plus the downloadable
 `.sh` attachment.
+
+## v0.3.0 RC combined Android/LTE installer
+
+The release-candidate combined installer is `lte-accessibility/install-combined.sh`.
+It rebuilds the loopback-only BUILD5 Android companion with a fresh device-local
+token, pauses only for Android's package-install consent, creates a zero-state
+CARSON core, applies the LTE accessibility overlay, and runs the full fresh
+Claude artifact -> download -> natural execution -> transcript -> continuation
+loop through `TASK_COMPLETE`. The installer requires no ADB, Wireless Debugging,
+or Wi-Fi. Samsung My Files navigation is attempted automatically through
+Downloads to the staged APK; manual navigation remains a bounded fallback.

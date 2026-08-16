@@ -1,5 +1,5 @@
 2da40c677039b593245c0f90d8c816b0a66b029bf2ef7a3a32f74390b30d1271  ./README.md
-d2396cac9c359d81c0967f267d61444308d9339e542b74db5a6d7bb143d7a792  ./acceptance/clone-fresh-e2e.sh
+bbda457687df018ae7f17294d7f1077f356011ff80903aa021a0f87ac591f563  ./acceptance/clone-fresh-e2e.sh
 59182c55e6c725693ec5b507fefc0c86b57e2ed357b2af0b181796de745b2b12  ./android/app/build.gradle
 eb730778d19dce0eaad3e2f4ed1abad869a1df8bd5018274de194d23d0990f2b  ./android/app/src/main/AndroidManifest.xml
 09ac71ad2b3d4eb39e1e269a9d0e6e7d69b85cba095d253420221463382c0896  ./android/app/src/main/java/io/carson/uibridge/CarsonAccessibilityService.java
@@ -18,3 +18,4 @@ ee1b204147726ba266ad25b1c7f813d6310471f3717885762f382c8538b2ee0c  ./evidence/acc
 11fd2952ae0817f50236bb99d8e2fe6bf8f4ba3b3443651ae13a3f185de3c294  ./runtime/carson-prompt
 42aabb6ce9def572c72d089e6c9e66e442f23bf9296d60ab20bad9bb0b5c24c6  ./runtime/listener.sh
 d826a09fa5e50ee34867edd53c258a438821368a7089e32382dacec2f50bc4c6  ./ui/carson-ui
+a42d7c31738761b7c2ddca2ea2b48a9e252e616c5d6c4ddae765c3c74bf8de87  ./install-combined.sh
