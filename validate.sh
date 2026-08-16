@@ -177,3 +177,22 @@ grep -Fq "! -name 'CARSON_AGENT_*'" lib/listener.sh || {
   printf 'VALIDATION_FAIL=auto-ingest does not exclude routed CARSON tasks\n' >&2
   exit 1
 }
+
+
+# LLM_FACING_TRANSCRIPT_CONTRACT_V1
+grep -Fq '# CARSON_LLM_TRANSCRIPT_CONTRACT_V1' bin/carson-prompt || {
+  printf 'VALIDATION_FAIL=initial transcript continuation contract missing\n' >&2
+  exit 1
+}
+grep -Fq '# CARSON_LLM_FACING_TRANSCRIPT_V1' lib/listener.sh || {
+  printf 'VALIDATION_FAIL=LLM-facing transcript publisher missing\n' >&2
+  exit 1
+}
+grep -Fq 'LLM_EXECUTION_TRANSCRIPT.txt' lib/listener.sh || {
+  printf 'VALIDATION_FAIL=stable LLM transcript filename missing\n' >&2
+  exit 1
+}
+grep -Fq 'publish_llm_execution_transcript "$file"' lib/listener.sh || {
+  printf 'VALIDATION_FAIL=transcript publisher not connected to execution path\n' >&2
+  exit 1
+}

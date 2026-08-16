@@ -41,3 +41,28 @@ then return `A/NEXT_LLM_MESSAGE.txt` to the same chat for the next turn.
 Already-routed `CARSON_AGENT_*` files are excluded. If multiple CARSON
 instances are active, `carson-prompt` fails closed unless `CARSON_INSTANCE_ID`
 is explicitly selected.
+
+
+## LLM-facing execution transcript
+
+The internal `A/NEXT_LLM_MESSAGE.txt` remains the CARSON machine record and is
+not intended to be attached to an arbitrary chat.
+
+After each executed task the listener also creates:
+
+- `A/LLM_EXECUTION_TRANSCRIPT.txt`
+- a stable Android-download copy named `LLM_EXECUTION_TRANSCRIPT.txt`
+
+That transcript contains only a plain description of the locally executed
+script, exit status, capture time, and task stdout. It intentionally omits
+CARSON protocol, instance/session IDs, routing metadata, and embedded model
+instructions.
+
+`carson-prompt` establishes the continuation contract in the initial direct
+user message: a later `LLM_EXECUTION_TRANSCRIPT.txt` attachment is user-provided
+runtime evidence from the script the chat supplied. The direct follow-up user
+message should be:
+
+`Use the attached local execution transcript as runtime evidence for the same task. If the original task is complete, follow the TASK_COMPLETE response contract from my first message. Otherwise continue from the existing state and return the next downloadable Termux .sh file.`
+
+The attachment itself is evidence, not an instruction channel.

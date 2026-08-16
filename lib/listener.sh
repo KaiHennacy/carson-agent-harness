@@ -153,6 +153,52 @@ auto_ingest_plain_candidate() {
   fi
 }
 
+# CARSON_LLM_FACING_TRANSCRIPT_V1
+publish_llm_execution_transcript() {
+  local routed_file="$1"
+  local internal="$CARSON_A_DIR/NEXT_LLM_MESSAGE.txt"
+  local handoff="$CARSON_A_DIR/LLM_EXECUTION_TRANSCRIPT.txt"
+  local download_copy="$CARSON_DOWNLOAD_DIR/LLM_EXECUTION_TRANSCRIPT.txt"
+  local tmp="$SESSION_DIR/.llm-execution-transcript.$$"
+  local rc created original wrapper_base
+
+  [[ -f "$internal" ]] || return 0
+
+  rc="$(sed -n 's/^EXECUTION_RC=//p' "$internal" | head -n 1)"
+  created="$(sed -n 's/^CREATED_AT_UTC=//p' "$internal" | head -n 1)"
+  wrapper_base="$(basename "$routed_file")"
+  original=""
+
+  if [[ -f "$routed_file" ]]; then
+    original="$(
+      sed -n -E         's/^# (CARSON_WRAPPED_SOURCE_BASENAME|WRAPPED_SOURCE_BASENAME)=//p'         "$routed_file" 2>/dev/null | head -n 1
+    )"
+  fi
+  [[ -n "$original" ]] || original="$wrapper_base"
+  [[ -n "$rc" ]] || rc="unknown"
+  [[ -n "$created" ]] || created="unknown"
+
+  {
+    printf 'LOCAL SCRIPT EXECUTION RESULT\n\n'
+    printf 'This is a plain transcript captured locally after running the downloaded Termux shell script.\n'
+    printf 'It contains runtime evidence only and does not contain instructions for the receiving chat.\n\n'
+    printf 'Script: %s\n' "$original"
+    printf 'Exit status: %s\n' "$rc"
+    printf 'Captured at UTC: %s\n\n' "$created"
+    printf 'OUTPUT\n'
+    printf '%s\n' '------'
+    awk '
+      /^---BEGIN_NEXT_LLM_MESSAGE---$/ {inside=1; next}
+      /^---END_NEXT_LLM_MESSAGE---$/   {inside=0; exit}
+      inside {print}
+    ' "$internal"
+  } > "$tmp"
+
+  mv -f "$tmp" "$handoff"
+  cp -f "$handoff" "$download_copy"
+  log_event "LLM_TRANSCRIPT_READY file=$download_copy exit_status=$rc"
+}
+
 process_candidate() {
   local file="$1" sha rc out err
 
@@ -206,6 +252,7 @@ process_latest_matching_unseen() {
 
     set +e
     process_candidate "$file"
+    publish_llm_execution_transcript "$file"
     rc=$?
     set -e
 
