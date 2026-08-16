@@ -51,3 +51,16 @@ env \
   CARSON_INSTANCE_LABEL="${CARSON_INSTANCE_LABEL:-default}" \
   CARSON_AUTOSTART="${CARSON_AUTOSTART:-1}" \
   bash "$ROOT/install.sh"
+
+# GLOBAL_CARSON_PROMPT_INSTALL
+# carson-prompt is stateless and should be available as a normal Termux command
+# after a clean quick-install. PREFIX is Termux's portable installation prefix.
+if [[ -z "${PREFIX:-}" || ! -d "$PREFIX/bin" ]]; then
+  printf 'ERROR=Termux PREFIX/bin unavailable; cannot install carson-prompt globally\n' >&2
+  exit 1
+fi
+install -m 755 "$ROOT/bin/carson-prompt" "$PREFIX/bin/carson-prompt"
+command -v carson-prompt >/dev/null 2>&1 || {
+  printf 'ERROR=global carson-prompt command not resolvable after install\n' >&2
+  exit 1
+}

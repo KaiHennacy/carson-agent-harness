@@ -58,3 +58,16 @@ bash ./install.sh
 
 Use the installed CLI's `list` command to discover instances and active routing
 information before generating a task file.
+
+## Global prompt command
+
+`quick-install.sh` installs the stateless `carson-prompt` helper into
+`$PREFIX/bin/carson-prompt`, so a clean Termux installation can invoke:
+
+```bash
+carson-prompt "your task"
+```
+
+without knowing the generated CARSON instance ID or installation directory.
+This is part of the portable quick-install contract. The helper contains no
+instance/session routing state.

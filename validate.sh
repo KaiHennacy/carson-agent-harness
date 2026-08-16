@@ -148,3 +148,13 @@ bash -n bin/carson-prompt || {
   printf 'VALIDATION_FAIL=direct prompt adapter documentation missing\n' >&2
   exit 1
 }
+
+# Global carson-prompt portability checks.
+grep -Fq '# GLOBAL_CARSON_PROMPT_INSTALL' quick-install.sh || {
+  printf 'VALIDATION_FAIL=quick-install global carson-prompt step missing\n' >&2
+  exit 1
+}
+grep -Fq 'install -m 755 "$ROOT/bin/carson-prompt" "$PREFIX/bin/carson-prompt"' quick-install.sh || {
+  printf 'VALIDATION_FAIL=quick-install does not install carson-prompt into PREFIX/bin\n' >&2
+  exit 1
+}
