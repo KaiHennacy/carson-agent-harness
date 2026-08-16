@@ -1,0 +1,16 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'io.carson.uibridge'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'io.carson.uibridge'
+        minSdk 23
+        targetSdk 34
+        versionCode 5
+        versionName '0.1.0-poc5'
+    }
+}

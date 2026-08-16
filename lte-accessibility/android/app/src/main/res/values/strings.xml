@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">CARSON UI Bridge</string>
+    <string name="accessibility_desc">Local CARSON UI automation bridge. Operates on-device and exposes a loopback-only control socket.</string>
+</resources>

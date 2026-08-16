@@ -1,0 +1,124 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -Eeuo pipefail
+
+PORT="18765"
+TOKEN_FILE="/data/data/com.termux/files/home/.carson_ui_lte_poc/control-token.txt"
+
+die(){ printf 'ERROR=%s\n' "$*" >&2; exit 1; }
+[[ -s "$TOKEN_FILE" ]] || die "control token missing"
+TOKEN="$(cat "$TOKEN_FILE")"
+
+b64() {
+  printf '%s' "$1" | base64 | tr -d '\n'
+}
+
+request() {
+  local line="$1"
+  if command -v nc >/dev/null 2>&1; then
+    printf '%s\n' "$line" | nc -w 35 127.0.0.1 "$PORT"
+  else
+    python - "$PORT" "$line" <<'PYCLIENT'
+import socket,sys
+port=int(sys.argv[1]); line=sys.argv[2]
+with socket.create_connection(("127.0.0.1",port),timeout=5) as s:
+    s.settimeout(35)
+    s.sendall((line+"\n").encode())
+    while True:
+        b=s.recv(65536)
+        if not b: break
+        sys.stdout.buffer.write(b)
+PYCLIENT
+  fi
+}
+
+cmd="${1:-}"
+case "$cmd" in
+  ping)
+    request "$TOKEN"$'\t'"PING"
+    ;;
+  state)
+    request "$TOKEN"$'\t'"STATE"
+    ;;
+  snapshot)
+    request "$TOKEN"$'\t'"SNAPSHOT"
+    ;;
+  find)
+    shift
+    request "$TOKEN"$'\t'"FIND_EXACT"$'\t'"$(b64 "$*")"
+    ;;
+  wait)
+    timeout_ms="${2:-15000}"
+    shift 2
+    request "$TOKEN"$'\t'"WAIT_EXACT"$'\t'"$timeout_ms"$'\t'"$(b64 "$*")"
+    ;;
+  wait-regex)
+    timeout_ms="${2:-15000}"
+    shift 2
+    request "$TOKEN"$'\t'"WAIT_REGEX"$'\t'"$timeout_ms"$'\t'"$(b64 "$*")"
+    ;;
+  wait-package)
+    timeout_ms="${2:-15000}"
+    pkg="${3:-}"
+    [[ -n "$pkg" ]] || die "usage: carson-ui wait-package TIMEOUT_MS PACKAGE"
+    request "$TOKEN"$'\t'"WAIT_PACKAGE"$'\t'"$timeout_ms"$'\t'"$(b64 "$pkg")"
+    ;;
+  click)
+    shift
+    request "$TOKEN"$'\t'"CLICK_EXACT"$'\t'"$(b64 "$*")"
+    ;;
+  click-top)
+    shift
+    request "$TOKEN"$'\t'"CLICK_EXACT_TOP"$'\t'"$(b64 "$*")"
+    ;;
+  click-bottom)
+    shift
+    request "$TOKEN"$'\t'"CLICK_EXACT_BOTTOM"$'\t'"$(b64 "$*")"
+    ;;
+  long-click)
+    shift
+    request "$TOKEN"$'\t'"LONG_CLICK_EXACT"$'\t'"$(b64 "$*")"
+    ;;
+  set-text)
+    shift
+    request "$TOKEN"$'\t'"SET_TEXT"$'\t'"$(b64 "$*")"
+    ;;
+  set-text-file)
+    file="${2:-}"
+    [[ -f "$file" ]] || die "file missing: $file"
+    text="$(cat "$file")"
+    request "$TOKEN"$'\t'"SET_TEXT"$'\t'"$(b64 "$text")"
+    ;;
+  back)
+    request "$TOKEN"$'\t'"BACK"
+    ;;
+  home)
+    request "$TOKEN"$'\t'"HOME"
+    ;;
+  open)
+    pkg="${2:-}"
+    [[ -n "$pkg" ]] || die "usage: carson-ui open PACKAGE"
+    request "$TOKEN"$'\t'"OPEN_PACKAGE"$'\t'"$(b64 "$pkg")"
+    ;;
+  *)
+    cat <<'USAGE'
+Usage:
+  carson-ui ping
+  carson-ui state
+  carson-ui snapshot
+  carson-ui find EXACT_TEXT
+  carson-ui wait TIMEOUT_MS EXACT_TEXT
+  carson-ui wait-regex TIMEOUT_MS REGEX
+  carson-ui wait-package TIMEOUT_MS PACKAGE
+  carson-ui click EXACT_TEXT
+  carson-ui click-top EXACT_TEXT
+  carson-ui click-bottom EXACT_TEXT
+  carson-ui long-click EXACT_TEXT
+  carson-ui set-text TEXT
+  carson-ui set-text-file FILE
+  carson-ui back
+  carson-ui home
+  carson-ui open PACKAGE
+USAGE
+    exit 64
+    ;;
+esac
